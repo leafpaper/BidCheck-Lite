@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>标书检查</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1f2328;--mute:#6b7280;--line:#e5e7eb;--pri:#2563eb;
+ --pass:#16a34a;--fail:#dc2626;--warn:#d97706;--manual:#7c3aed;--na:#9ca3af}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--mute);margin-bottom:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+.drops{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.drops{grid-template-columns:1fr}}
+.drop{border:2px dashed #cbd5e1;border-radius:10px;padding:22px 12px;text-align:center;cursor:pointer;transition:.15s;min-height:110px;display:flex;flex-direction:column;justify-content:center}
+.drop:hover,.drop.over{border-color:var(--pri);background:#eff6ff}
+.drop b{display:block;font-size:15px;margin-bottom:4px}
+.drop .name{color:var(--pri);word-break:break-all}
+.drop .hint{color:var(--mute);font-size:12px}
+.opts{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin-top:14px}
+.opts label{display:flex;gap:6px;align-items:center;color:var(--mute)}
+.opts label.off{opacity:.55}
+button{font:inherit;border:0;border-radius:8px;padding:10px 22px;background:var(--pri);color:#fff;cursor:pointer;font-weight:600}
+button:disabled{background:#9ca3af;cursor:not-allowed}
+button.ghost{background:#fff;color:var(--ink);border:1px solid var(--line);font-weight:500;padding:6px 12px}
+.bar{height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;margin-top:12px}
+.bar i{display:block;height:100%;background:var(--pri);width:0;transition:width .4s}
+.msg{color:var(--mute);margin-top:6px;font-size:13px}
+.err{color:var(--fail);white-space:pre-wrap}
+.sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.kpi{border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.kpi small{color:var(--mute);display:block}
+.kpi b{font-size:22px}
+.risk-high b{color:var(--fail)}.risk-medium b{color:var(--warn)}.risk-low b{color:var(--pass)}
+.hard{display:flex;flex-wrap:wrap;gap:8px 18px;color:var(--mute);margin-top:10px;font-size:13px}
+.hard span b{color:var(--ink)}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 6px}
+.chip{border:1px solid var(--line);background:#fff;border-radius:99px;padding:3px 12px;cursor:pointer;font-size:13px}
+.chip.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+h2.g{font-size:15px;margin:18px 0 8px;display:flex;justify-content:space-between;align-items:center}
+h2.g small{color:var(--mute);font-weight:400}
+.f{border:1px solid var(--line);border-left:4px solid var(--na);border-radius:8px;padding:10px 12px;margin-bottom:8px;background:#fff}
+.f.pass{border-left-color:var(--pass)}.f.fail{border-left-color:var(--fail);background:#fff7f7}
+.f.warning{border-left-color:var(--warn)}.f.manual{border-left-color:var(--manual)}
+.f .t{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.f .t b{font-size:14px}
+.badge{font-size:11px;padding:1px 8px;border-radius:99px;color:#fff;background:var(--na)}
+.badge.pass{background:var(--pass)}.badge.fail{background:var(--fail)}.badge.warning{background:var(--warn)}.badge.manual{background:var(--manual)}
+.f .id{color:var(--mute);font-size:12px;font-family:Consolas,monospace}
+.f dl{margin:6px 0 0;display:grid;grid-template-columns:64px 1fr;gap:2px 8px;font-size:13px}
+.f dt{color:var(--mute)}
+.f dd{margin:0;word-break:break-word}
+.loc{display:inline-block;background:#f1f5f9;border-radius:4px;padding:0 6px;margin:1px 4px 1px 0;font-size:12px;color:#334155;cursor:help}
+.fix{color:#065f46}
+.miss{color:#991b1b}
+.hist table{width:100%;border-collapse:collapse;font-size:13px}
+.hist td,.hist th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
+.hist tr:hover{background:#f8fafc;cursor:pointer}
+.tools{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.foot{color:var(--mute);font-size:12px;margin-top:8px}
+.top{display:flex;justify-content:space-between;align-items:center}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+.grid2 label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--mute)}
+.grid2 input{font:inherit;padding:7px 9px;border:1px solid var(--line);border-radius:6px;color:var(--ink)}
+.ok{color:var(--pass)}
+.link{color:var(--pri);cursor:pointer;font-size:12px;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>标书检查</h1><span><button class="ghost" id="openSet">⚙ 设置</button> <button class="ghost" id="quit" title="关闭后台程序">退出程序</button></span></div>
+  <div class="sub">上传招标（磋商）文件与投标（响应）文件，逐条比对并给出页码定位。支持福建施工招标与政府采购竞争性磋商两种模板，自动识别。</div>
+
+  <div class="card" id="setPanel" hidden>
+    <b>接口设置</b><div class="foot" style="margin:2px 0 10px">key 只保存在本机 lite_data/settings.json，不上传到别处。两项都可不填：不填则扫描件和语义条目标为"待人工"。</div>
+    <div class="grid2">
+      <label>阿里云百炼 key（扫描件 OCR，qwen-vl-max）<input id="sAli" placeholder="sk-…" autocomplete="off"></label>
+      <label>LLM key（语义判断，默认 DeepSeek）<input id="sKey" placeholder="sk-…" autocomplete="off"></label>
+      <label>LLM 接口地址<input id="sBase" placeholder="https://api.deepseek.com/v1"></label>
+      <label>LLM 模型名 <span class="link" id="sModels">获取可用模型</span><input id="sModel" list="modelList" placeholder="deepseek-flash"><datalist id="modelList"></datalist></label>
+    </div>
+    <div class="tools">
+      <button id="sSave">保存</button>
+      <button class="ghost" id="sTestOcr">测试 OCR</button>
+      <button class="ghost" id="sTestLlm">测试 LLM</button>
+      <button class="ghost" id="sClose">关闭</button>
+      <span class="msg" id="sMsg" style="margin:0;align-self:center"></span>
+    </div>
+    <div class="tools" style="border-top:1px solid var(--line);padding-top:10px">
+      <span class="msg" id="cacheInfo" style="margin:0;align-self:center"></span>
+      <button class="ghost" id="cClear">清理解析缓存</button>
+      <button class="ghost" id="cClearAll">清空全部记录</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="drops">
+      <div class="drop" id="dropT"><b>① 招标 / 磋商文件</b><span class="name" id="nameT">点击或拖入 PDF / DOCX</span><span class="hint">招标文件、磋商文件（PDF 或 Word，PDF 更准）</span></div>
+      <div class="drop" id="dropB"><b>② 投标 / 响应文件</b><span class="name" id="nameB">点击或拖入 PDF / DOCX</span><span class="hint">投标文件、响应文件（PDF 或 Word）</span></div>
+    </div>
+    <input type="file" id="fileT" accept=".pdf,.docx" hidden><input type="file" id="fileB" accept=".pdf,.docx" hidden>
+    <div class="opts">
+      <label id="lblOcr"><input type="checkbox" id="ocr" checked> 扫描件 OCR（证书、盖章页）<span id="ocrHint"></span></label>
+      <label id="lblLlm"><input type="checkbox" id="llm"> 语义判断（LLM）<span id="llmHint"></span></label>
+      <span style="flex:1"></span>
+      <button id="go" disabled>开始检查</button>
+    </div>
+    <div class="bar" id="bar" hidden><i id="barI"></i></div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+  <div id="result" hidden>
+    <div class="card">
+      <div class="sum" id="sum"></div>
+      <div class="hard" id="hard"></div>
+      <div class="tools">
+        <a id="dlMd" class="ghost" download><button class="ghost">下载 Markdown 报告</button></a>
+        <a id="dlJson" class="ghost" download><button class="ghost">下载 JSON</button></a>
+        <button class="ghost" id="again">再检查一份</button>
+      </div>
+      <div class="foot" id="foot"></div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div id="list"></div>
+  </div>
+
+  <div class="card hist" id="hist" hidden>
+    <b>最近检查</b>
+    <table><thead><tr><th>时间</th><th>招标文件</th><th>投标文件</th><th>模板</th><th>风险</th><th>不通过/警告</th><th></th></tr></thead><tbody id="histBody"></tbody></table>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const V={pass:'通过',fail:'不通过',warning:'警告',manual:'待人工',na:'不适用'};
+const RISK={high:'高',medium:'中',low:'低'};
+let fileT=null,fileB=null,cur=null,filter='all';
+
+function bindDrop(zone,input,set){
+  zone.onclick=()=>input.click();
+  input.onchange=()=>set(input.files[0]);
+  zone.ondragover=e=>{e.preventDefault();zone.classList.add('over')};
+  zone.ondragleave=()=>zone.classList.remove('over');
+  zone.ondrop=e=>{e.preventDefault();zone.classList.remove('over');set(e.dataTransfer.files[0])};
+}
+bindDrop($('#dropT'),$('#fileT'),f=>{fileT=f;$('#nameT').textContent=f?f.name:'点击或拖入 PDF / DOCX';ready()});
+bindDrop($('#dropB'),$('#fileB'),f=>{fileB=f;$('#nameB').textContent=f?f.name:'点击或拖入 PDF / DOCX';ready()});
+function ready(){$('#go').disabled=!(fileT&&fileB)}
+
+function applySettings(s){
+  const ocr=$('#ocr'),llm=$('#llm');
+  ocr.disabled=!s.ocr;$('#lblOcr').classList.toggle('off',!s.ocr);
+  if(!s.ocr){ocr.checked=false;$('#ocrHint').textContent='（未填阿里云 key，扫描件将标为待人工）'}else{ocr.checked=true;$('#ocrHint').textContent=''}
+  llm.disabled=!s.llm;$('#lblLlm').classList.toggle('off',!s.llm);
+  $('#llmHint').textContent=s.llm?'（'+s.llm_model+'）':'（未填 LLM key，语义条目标为待人工）';
+  if(!s.llm)llm.checked=false;
+  $('#sAli').value=s.aliyun_key||'';$('#sKey').value=s.llm_key||'';$('#sBase').value=s.llm_base||'';$('#sModel').value=s.llm_model_val||'';
+}
+fetch('/api/settings').then(r=>r.json()).then(applySettings);
+$('#openSet').onclick=()=>{$('#setPanel').hidden=!$('#setPanel').hidden;$('#sMsg').textContent='';if(!$('#setPanel').hidden)loadCache()};
+$('#sClose').onclick=()=>{$('#setPanel').hidden=true};
+const dirty=new Set();
+[['sAli','aliyun_key'],['sKey','llm_key'],['sBase','llm_base'],['sModel','llm_model']].forEach(([id,k])=>{$('#'+id).oninput=()=>dirty.add(k)});
+$('#sSave').onclick=async()=>{
+  const all={aliyun_key:$('#sAli').value,llm_key:$('#sKey').value,llm_base:$('#sBase').value,llm_model:$('#sModel').value};
+  const body={};dirty.forEach(k=>body[k]=all[k]);   // 只发用户改过的字段，没改的（含掩码显示的 key）不动
+  const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  dirty.clear();applySettings(await r.json());$('#sMsg').textContent='已保存';$('#sMsg').className='msg ok';
+};
+async function testKey(kind){
+  $('#sMsg').textContent='测试中…';$('#sMsg').className='msg';
+  await $('#sSave').onclick();
+  const r=await fetch('/api/settings/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind})});
+  const j=await r.json();$('#sMsg').textContent=(j.ok?'✔ ':'✘ ')+j.message;$('#sMsg').className='msg '+(j.ok?'ok':'err');
+  if(j.models&&j.models.length){fillModels(j.models);$('#sModel').value=j.models[0];dirty.add('llm_model')}
+}
+function fillModels(list){$('#modelList').innerHTML=list.map(m=>`<option value="${esc(m)}">`).join('')}
+$('#sTestOcr').onclick=()=>testKey('ocr');$('#sTestLlm').onclick=()=>testKey('llm');
+$('#sModels').onclick=async()=>{
+  await $('#sSave').onclick();$('#sMsg').textContent='读取模型列表…';$('#sMsg').className='msg';
+  const j=await (await fetch('/api/settings/models')).json();
+  if(!j.ok){$('#sMsg').textContent='✘ '+j.message;$('#sMsg').className='msg err';return}
+  fillModels(j.models);
+  if(!j.models.includes($('#sModel').value)){$('#sModel').value=j.models[0]||'';dirty.add('llm_model')}
+  $('#sMsg').textContent='可用模型：'+j.models.join('、')+(dirty.has('llm_model')?'（已改为 '+$('#sModel').value+'，请保存）':'');$('#sMsg').className='msg ok';
+};
+async function loadCache(){const c=await (await fetch('/api/cache')).json();$('#cacheInfo').textContent=`解析缓存 ${c.cache_mb} MB · 检查记录 ${c.jobs} 条 ${c.jobs_mb} MB`}
+$('#cClear').onclick=async()=>{await fetch('/api/cache/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});loadCache()};
+$('#cClearAll').onclick=async()=>{if(!confirm('删除全部检查记录和上传的文件？'))return;await fetch('/api/cache/clear',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"jobs":true}'});loadCache();loadHist();$('#result').hidden=true};
+$('#quit').onclick=async()=>{if(!confirm('关闭标书检查程序？'))return;try{await fetch('/api/quit',{method:'POST'})}catch(e){}document.body.innerHTML='<div class="wrap"><h1>已退出</h1><div class="sub">可以关闭此页面。要再次使用请重新双击程序。</div></div>'};
+
+$('#go').onclick=async()=>{
+  const fd=new FormData();fd.append('tender',fileT);fd.append('bid',fileB);
+  fd.append('use_ocr',$('#ocr').checked);fd.append('use_llm',$('#llm').checked);
+  $('#go').disabled=true;$('#bar').hidden=false;$('#barI').style.width='2%';$('#msg').textContent='上传中…';$('#msg').className='msg';
+  $('#result').hidden=true;
+  try{
+    const r=await fetch('/api/run',{method:'POST',body:fd});
+    if(!r.ok){throw new Error((await r.json()).detail||r.statusText)}
+    poll((await r.json()).id);
+  }catch(e){$('#msg').textContent='提交失败：'+e.message;$('#msg').className='msg err';$('#go').disabled=false}
+};
+
+let t0=0;
+async function poll(id){
+  if(!t0)t0=Date.now();
+  const r=await fetch('/api/job/'+id);const j=await r.json();
+  if(j.status==='running'){
+    const sec=Math.round((Date.now()-t0)/1000);
+    $('#barI').style.width=Math.max(2,j.progress*100)+'%';
+    $('#msg').textContent=(j.message||'处理中…')+'　'+sec+' 秒'+(sec>8&&j.progress<0.6?'（大文件解析较慢，几百页约需半分钟，首次解析后会缓存）':'');
+    setTimeout(()=>poll(id),1200);return;
+  }
+  t0=0;
+  $('#go').disabled=false;
+  if(j.status==='error'){$('#barI').style.width='100%';$('#msg').textContent='检查失败：'+j.error;$('#msg').className='msg err';return}
+  $('#barI').style.width='100%';$('#msg').textContent='完成，用时 '+j.elapsed_s+' 秒';
+  show(j);loadHist();
+}
+
+function loc(l,doc){
+  if(!l)return '';
+  const parts=[];
+  if(l.page)parts.push('第'+l.page+(l.page_end&&l.page_end!==l.page?'-'+l.page_end:'')+'页');
+  if(l.section)parts.push(l.section);if(l.form)parts.push(l.form);if(l.clause)parts.push(l.clause);
+  if(!parts.length&&l.para_index!=null)parts.push('段落#'+l.para_index);
+  const t=(doc||(l.doc==='tender'?'招标':'投标'))+' '+parts.join(' · ');
+  return '<span class="loc" title="'+esc(l.excerpt||'')+'">'+esc(t)+'</span>';
+}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function money(v){return v==null?null:(typeof v==='object'?v.value:v)}
+
+function show(j){
+  cur=j;const p=j.report,s=p.summary;
+  $('#result').hidden=false;
+  $('#sum').innerHTML=`
+   <div class="kpi risk-${p.risk_level}"><small>风险等级</small><b>${RISK[p.risk_level]||p.risk_level}</b></div>
+   <div class="kpi"><small>否决级问题</small><b style="color:${p.has_critical_issues?'var(--fail)':'var(--pass)'}">${p.has_critical_issues?'有':'无'}</b></div>
+   <div class="kpi"><small>不通过</small><b style="color:var(--fail)">${s.failed}</b></div>
+   <div class="kpi"><small>警告</small><b style="color:var(--warn)">${s.warning-s.manual}</b></div>
+   <div class="kpi"><small>待人工</small><b style="color:var(--manual)">${s.manual}</b></div>
+   <div class="kpi"><small>通过</small><b style="color:var(--pass)">${s.passed}</b></div>`;
+  const h=p.hard_values||{},hv=[];
+  const add=(k,l,f)=>{const v=h[k];if(v==null)return;const x=money(v);if(x==null||x==='')return;hv.push(`<span>${l} <b>${f?f(x):x}</b></span>`)};
+  add('control_price','控制价/最高限价',x=>Number(x).toLocaleString()+' 元');add('duration_days','工期',x=>x+' 日历天');
+  add('validity_days','有效期',x=>x+' 天');add('deposit','保证金',x=>Number(x).toLocaleString()+' 元');
+  add('quality','质量');add('deadline','截止');add('joint_venture','联合体',x=>x.allowed?'接受':'不接受');
+  $('#hard').innerHTML=hv.join('');
+  $('#dlMd').href='/api/job/'+j.id+'/report.md';$('#dlJson').href='/api/job/'+j.id+'/report.json';
+  $('#foot').textContent=`模板 ${p.profile.key}（置信度 ${p.profile.confidence}） · 招标 ${p.tender.pages} 页 · 投标 ${p.bid.pages} 页 · LLM ${p.stats.llm_calls} 次 · OCR ${p.stats.ocr_pages} 页`
+    +(p.stats.parse_warnings?.length?' · 解析提示：'+p.stats.parse_warnings.join('；'):'');
+  const cnt={all:p.findings.length};p.findings.forEach(f=>cnt[f.verdict]=(cnt[f.verdict]||0)+1);
+  filter=cnt.fail?'fail':(cnt.warning?'warning':'all');
+  $('#chips').innerHTML=['all','fail','warning','manual','pass','na'].map(k=>`<span class="chip ${k===filter?'on':''}" data-k="${k}">${k==='all'?'全部':V[k]} ${cnt[k]||0}</span>`).join('');
+  document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{filter=c.dataset.k;document.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===c));renderList()});
+  renderList();
+  window.scrollTo({top:$('#result').offsetTop-10,behavior:'smooth'});
+}
+
+function renderList(){
+  const fs=cur.report.findings.filter(f=>filter==='all'||f.verdict===filter);
+  const groups={};fs.forEach(f=>(groups[f.group]=groups[f.group]||[]).push(f));
+  $('#list').innerHTML=Object.entries(groups).map(([g,arr])=>`<h2 class="g">${esc(g)}<small>${arr.length} 条</small></h2>`+arr.map(card).join('')).join('')
+    ||'<div class="card" style="color:var(--mute)">该类别下没有条目</div>';
+}
+function card(f){
+  const ev=f.evidence?.length?f.evidence.slice(0,4).map(e=>loc(e,'投标')).join(''):'<span class="loc">投标 未找到</span>';
+  return `<div class="f ${f.verdict}">
+   <div class="t"><span class="badge ${f.verdict}">${V[f.verdict]}</span><b>${esc(f.title)}</b><span class="id">${f.rule_id} · ${f.method}${f.confidence<1?' · 置信 '+f.confidence:''}</span></div>
+   <dl>
+    <dt>招标要求</dt><dd>${esc(f.requirement)||'—'} ${loc(f.requirement_loc,'招标')}</dd>
+    <dt>投标实际</dt><dd>${esc(f.actual)||'—'} ${ev}</dd>
+    ${f.missing?`<dt>问题</dt><dd class="miss">${esc(f.missing)}</dd>`:''}
+    ${f.fix?`<dt>建议</dt><dd class="fix">${esc(f.fix)}</dd>`:''}
+   </dl></div>`;
+}
+
+$('#again').onclick=()=>{window.scrollTo({top:0,behavior:'smooth'})};
+
+async function loadHist(){
+  const arr=await (await fetch('/api/jobs')).json();
+  $('#hist').hidden=!arr.length;
+  $('#histBody').innerHTML=arr.map(m=>{const d=new Date(m.created*1000);const s=m.summary||{};
+    return `<tr data-id="${m.id}"><td>${d.toLocaleString('zh-CN',{hour12:false})}</td><td>${esc(m.tender)}</td><td>${esc(m.bid)}</td><td>${m.profile||''}</td>
+     <td>${m.status==='done'?RISK[m.risk_level]:(m.status==='error'?'失败':'进行中')}</td><td>${m.status==='done'?s.failed+' / '+(s.warning-s.manual):''}</td>
+     <td><button class="ghost del" data-id="${m.id}" title="删除">✕</button></td></tr>`}).join('');
+  document.querySelectorAll('#histBody tr').forEach(tr=>tr.onclick=async e=>{
+    if(e.target.classList.contains('del')){e.stopPropagation();if(confirm('删除这条记录？')){await fetch('/api/job/'+tr.dataset.id,{method:'DELETE'});loadHist()}return}
+    const j=await (await fetch('/api/job/'+tr.dataset.id)).json();
+    if(j.status==='done')show(j);else if(j.status==='running')poll(j.id);else alert(j.error||'该记录没有报告');
+  });
+}
+loadHist();
+</script>
+</body>
+</html>
