@@ -1,0 +1,10 @@
+# 标书检查 Lite 运行依赖（Python 3.12）
+pymupdf>=1.26,<2
+pdfplumber>=0.11,<0.12
+pydantic>=2.7,<3
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.9
+openai>=1.40
+python-docx>=1.1
+pillow>=10
