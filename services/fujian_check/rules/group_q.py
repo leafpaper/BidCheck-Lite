@@ -3,11 +3,43 @@ from __future__ import annotations
 
 import re
 
-from services.fujian_check.models import Finding
+from services.fujian_check.dates import add_months, find_dates, iso, parse_date
+from services.fujian_check.models import Finding, FormRange
 from services.fujian_check.rules._helpers import fmt_money
 from services.fujian_check.rules.base import Rule, RuleContext
 
 GROUP = "资格文件否决"
+
+
+def performance_rows(ctx: RuleContext, fr: FormRange) -> list[tuple[str, str | None]]:
+    """类似工程业绩汇总表 → [(项目名称, 竣工验收日期)]。优先表格列，文字层被切碎时退化为整页找日期。"""
+    from services.fujian_check.tender._tables import tables_for_pages
+
+    pages = list(range(fr.page_start, min(fr.page_end or fr.page_start, fr.page_start + 1) + 1))
+    rows: list[tuple[str, str | None]] = []
+    for p, tbls in tables_for_pages(ctx.bdoc, pages).items():
+        for tb in tbls:
+            col = None
+            for row in tb:
+                cells = [re.sub(r"\s+", "", c or "") for c in row]
+                if col is None:
+                    for i, c in enumerate(cells):
+                        if "竣工" in c and "日期" in c and "开工" not in c:
+                            col = i
+                            break
+                    continue
+                if not any(cells):
+                    continue
+                name = next((c for c in cells if len(c) >= 6 and re.search(r"[一-龥]{4,}", c) and not re.search(r"\d{4}[.\-/]", c)), "")
+                ds = find_dates(cells[col]) if col < len(cells) else []
+                if name or ds:
+                    rows.append((name[:40], ds[-1] if ds else None))
+    if not rows:
+        for p in pages:
+            ds = find_dates(ctx.bdoc.page_text(p))
+            for d in ds:
+                rows.append(("", d))
+    return rows
 
 
 class Q03Deposit(Rule):
@@ -86,12 +118,28 @@ class Q09SimilarProjects(Rule):
         req_loc = ctx.clause_loc("3.1.9")
         if need in (0, None):
             return [self.na(f"招标要求类似工程业绩 {need if need is not None else '未设'} 个，投标阶段不评审", req_loc)]
-        fr = ctx.form("类似工程业绩")
+        cands = [f for f in ctx.idx.forms if f.page_start and "类似工程业绩" in (f.form.title if f.form else f.matched_title)]
+        fr = next((f for f in cands if f.form and f.form.section == "资格文件"), None) or (cands[0] if cands else None)
         if not fr or not fr.page_start:
             return [self.make("fail", requirement=f"类似工程业绩 ≥ {need} 个", requirement_loc=req_loc, actual="未提交业绩汇总表",
                               missing="缺业绩（否决）", fix="补充业绩表及合同/验收证明")]
-        return [self.manual(f"类似工程业绩 ≥ {need} 个（须附合同与竣工验收证明，四库一平台可查）", "已提交业绩表，需人工核对数量与证明",
-                            [ctx.form_loc(fr)], req_loc)]
+        years = ctx.req.hard.similar_projects_years
+        notice = parse_date(ctx.req.hard.notice_date)
+        win = add_months(notice, -12 * years) if (years and notice) else None
+        rows = performance_rows(ctx, fr)
+        req = f"类似工程业绩 ≥ {need} 个" + (f"（{iso(win)} 起，前 {years} 年内竣工验收）" if win else "")
+        ev = [ctx.form_loc(fr)]
+        dated = [(n, d) for n, d in rows if d]
+        if not dated:
+            return [self.manual(req + "，须附合同与竣工验收证明", f"已提交业绩表（{len(rows)} 行），竣工日期未能机器识别，需人工核对数量、时间与证明材料",
+                                ev, req_loc)]
+        qualified = [(n, d) for n, d in dated if not win or parse_date(d) >= win]
+        actual = "；".join(f"{n or '业绩'} 竣工 {d}" for n, d in dated[:6])
+        ok = len(qualified) >= need
+        return [self.make("pass" if ok else "fail", requirement=req, requirement_loc=req_loc,
+                          actual=f"汇总表 {len(dated)} 条，时间窗内 {len(qualified)} 条：" + actual,
+                          evidence=ev, missing="" if ok else f"时间窗内合格业绩 {len(qualified)} < {need}（3.1.9 否决）",
+                          fix=("" if ok else "更换在时间窗内竣工验收的类似业绩") + "；合同与竣工验收证明扫描件仍需人工核对", confidence=0.8)]
 
 
 class Q11ProhibitedSituations(Rule):

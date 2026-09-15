@@ -154,4 +154,40 @@ class X06SafetyFee(Rule):
                           missing="" if ok else "汇总表未单列安全文明施工费或暂列金额")]
 
 
-RULES = [X01TotalPrice, X02Appendix, X03ProjectManager, X05BidderName, X06SafetyFee]
+class X07ForeignProjectResidue(Rule):
+    id, group, title, severity = "FJ-X-07", GROUP, "其他项目的招标编号/项目名称残留（粘贴未改）", "major"
+    supersedes = ["consistency", "fitScore"]
+
+    async def run(self, ctx: RuleContext) -> list[Finding]:
+        code, name = ctx.req.project_code, ctx.req.project_name
+        if not code and not name:
+            return [self.na("招标未抽到项目编号/名称")]
+        key = code[:15] if code else None
+        rx_code = re.compile(r"(?<![A-Z0-9])[A-Z]{1,2}\d{14,22}")
+        rx_name = re.compile(r"招标项目名称\s*[:：]?\s*([^\n:：]{6,60}?)(?:\s*招标项目编号|\n|$)")
+        hits: dict[str, Location] = {}
+        for p in range(1, ctx.bdoc.n_pages + 1):
+            t = ctx.bdoc.page_text(p)
+            if key:
+                for m in rx_code.finditer(t):
+                    c = m.group(0)
+                    if not c.startswith(key) and not key.startswith(c) and c not in hits:
+                        hits[c] = ctx.bid_page_loc(p, None, t[max(0, m.start() - 40): m.end() + 40])
+            if name:
+                for m in rx_name.finditer(t):
+                    n = norm(m.group(1))
+                    if n and n not in hits and norm(name) not in n and n not in norm(name):
+                        from services.fujian_check.textnorm import similarity
+
+                        if similarity(n, name) < 0.6:
+                            hits[n] = ctx.bid_page_loc(p, None, m.group(0))
+            if len(hits) >= 8:
+                break
+        req = f"投标文件不得出现其他项目的招标编号/名称（本项目 {code or name}）"
+        if not hits:
+            return [self.make("pass", requirement=req, actual="全文未发现其他项目编号或项目名称")]
+        return [self.make("warning", requirement=req, actual="疑似残留：" + "；".join(f"{k}(p{v.page})" for k, v in list(hits.items())[:6]),
+                          evidence=list(hits.values())[:6], missing="疑似套用其他项目文件未改（暗标中出现将被判不合格）", fix="逐处核对并改为本项目信息")]
+
+
+RULES = [X01TotalPrice, X02Appendix, X03ProjectManager, X05BidderName, X06SafetyFee, X07ForeignProjectResidue]

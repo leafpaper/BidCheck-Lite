@@ -107,6 +107,34 @@ def find_dangerous_works(rows: list[DataSheetRow]) -> list[Sourced]:
     return []
 
 
+def find_similar_project_years(rows: list[DataSheetRow]) -> int | None:
+    """3.1.9「自…发布招标公告之日的前 5 年内」→ 5。"""
+    for r in rows:
+        if "类似工程业绩" in r.name or r.clause.startswith("3.1.9"):
+            m = re.search(r"前\s*([一二三四五六七八九十\d]{1,2})\s*年", r.content)
+            if m:
+                from services.fujian_check.textnorm import cn_to_int
+
+                v = m.group(1)
+                return int(v) if v.isdigit() else cn_to_int(v)
+    return None
+
+
+_SOCIAL_START_RE = re.compile(r"上\s*([一二三四五六七八九十\d]{1,2})\s*个月\s*为始点")
+_SOCIAL_MONTHS_RE = re.compile(r"(?:累计|连续缴费累计|连续)\s*([一二三四五六七八九十\d]{1,2})\s*个月")
+
+
+def find_social_window(text: str) -> tuple[int | None, int | None]:
+    """社保要求「截止之日的上二个月为始点并往前追溯连续缴费累计六个月」→ (2, 6)。"""
+    from services.fujian_check.textnorm import cn_to_int
+
+    def _n(s: str) -> int | None:
+        return int(s) if s.isdigit() else cn_to_int(s)
+    a = _SOCIAL_START_RE.search(text or "")
+    b = _SOCIAL_MONTHS_RE.search(text or "")
+    return (_n(a.group(1)) if a else None), (_n(b.group(1)) if b else None)
+
+
 def find_similar_projects(rows: list[DataSheetRow]) -> int | None:
     for r in rows:
         if "类似工程业绩" in r.name or r.clause.startswith("3.1.9"):

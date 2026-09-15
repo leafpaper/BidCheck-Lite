@@ -44,6 +44,22 @@ def test_pass_rules(report):
     assert set(_verdicts(report, "FJ-S-01")) == {"pass"} and len(_verdicts(report, "FJ-S-01")) == 7
 
 
+def test_v02_rules_on_golden(report):
+    """v0.2 新规则：签署日期、岗位证书、注册专业、人员表自检、异项目残留（全部文字层，0 token）。"""
+    for rid in ("FJ-P-09", "FJ-S-03", "FJ-S-05", "FJ-X-07"):
+        assert _verdicts(report, rid) == ["pass"], rid
+    p09 = _one(report, "FJ-P-09")
+    assert "2026-08-12" in p09.actual and "2026-08-13" in p09.requirement and "2026-07-17" in p09.requirement
+    s07 = [f for f in report.findings if f.rule_id == "FJ-S-07"]
+    assert len(s07) == 3 and all(f.verdict == "pass" for f in s07)
+    p07 = _one(report, "FJ-P-07")
+    assert "2027-01-26" in p07.actual                       # 简要情况表文字层的注册证书有效期
+    c07 = _one(report, "FJ-C-07")
+    assert c07.verdict == "manual" and c07.evidence         # 未开 OCR → 定位到扫描页待人工
+    assert report.hard.notice_date == "2026-07-17" and report.hard.similar_projects_years == 5
+    assert (report.hard.social_start_offset, report.hard.social_months) == (2, 6)
+
+
 def test_known_defects(report):
     t02 = [f for f in report.findings if f.rule_id == "FJ-T-02"]
     fails = [f for f in t02 if f.verdict == "fail"]

@@ -6,7 +6,7 @@ from collections import Counter, defaultdict
 from services.fujian_check import ENGINE_VERSION
 from services.fujian_check.models import BidIndex, CheckReport, Finding, Location, RunStats, TenderRequirements
 
-GROUP_ORDER = ["资格文件否决", "商务初审否决", "详细评审否决", "技术文件暗标", "前附表硬值", "交叉一致性",
+GROUP_ORDER = ["资格文件否决", "商务初审否决", "详细评审否决", "技术文件暗标", "前附表硬值", "签署与日期", "交叉一致性",
                "表单齐全性", "人员配备", "电子标", "扫描件证书"]
 
 

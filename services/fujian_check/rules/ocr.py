@@ -18,9 +18,11 @@ VISION_BASE_URL = os.environ.get("FJ_VISION_BASE_URL", "https://dashscope.aliyun
 
 PROMPTS = {
     "cert": (
-        "这是一份工程投标文件中的一页扫描件。请判断该页是否包含证书/执照/许可证/凭证/承诺函/授权书等材料。"
-        "若包含，请逐条列出可见要素，格式为一行一项：类型|名称|编号|发证机关|有效期(起-止)|持有人或单位|其他关键字（如资质等级、注册专业）。"
-        "日期尽量写成 YYYY-MM-DD。看不清的字段写'不清'。若整页无法辨认写'无法辨认'；若页面不含上述材料只回'无证书'。不要编造。"
+        "这是一份工程投标文件中的一页扫描件。请判断该页是否包含证书/执照/许可证/身份证/授权委托书/承诺函/社保缴费证明/银行凭证/保函等材料。"
+        "若包含，请逐条列出可见要素，格式为一行一项，共 9 个字段用竖线分隔："
+        "类型|名称|编号|发证机关|有效期(起-止)|持有人或单位|落款或签发日期|缴费月份(社保证明列出全部月份或区间)|其他关键字（如资质等级、注册专业、委托人、被委托人、付款账号、金额）。"
+        "日期尽量写成 YYYY-MM-DD，月份写成 YYYY-MM。没有的字段留空，看不清的字段写'不清'。"
+        "若整页无法辨认写'无法辨认'；若页面不含上述材料只回'无证书'。不要编造。"
     ),
     "title": "这是一份投标文件中的一页扫描件。请只输出该页最上方的标题或表单名称一行文字，看不清写'无法辨认'。",
 }
@@ -84,15 +86,27 @@ async def ocr_pages(pdf_path: str, file_hash: str, pages: list[int], prompt_key:
     return out
 
 
+_SEV_RANK = {"reject": 0, "major": 1, "minor": 2, "info": 3}
+
+
 async def prefill_ocr(ctx: RuleContext, rules: list[Rule]) -> None:
-    """收集所有 OCR 规则需要的页，去重后一次性识别，写入 ctx.ocr_text。"""
-    wanted: list[int] = []
-    for r in rules:
+    """收集所有 OCR 规则需要的页，按规则严重度排优先级、去重后一次性识别，写入 ctx.ocr_text。
+
+    超预算时先丢低严重度规则的页（如加分材料），否决级证书页优先。
+    """
+    ranked: list[tuple[int, int, int]] = []
+    for i, r in enumerate(sorted(rules, key=lambda x: _SEV_RANK.get(x.severity, 9))):
         try:
-            wanted += r.ocr_pages_needed(ctx)
+            for p in r.ocr_pages_needed(ctx):
+                ranked.append((_SEV_RANK.get(r.severity, 9), i, p))
         except Exception:
             continue
-    wanted = [p for p in dict.fromkeys(wanted) if 1 <= p <= ctx.bdoc.n_pages]
+    seen: set[int] = set()
+    wanted: list[int] = []
+    for _s, _i, p in sorted(ranked):
+        if p not in seen and 1 <= p <= ctx.bdoc.n_pages:
+            seen.add(p)
+            wanted.append(p)
     if not wanted:
         return
     if len(wanted) > ctx.ocr_budget:
@@ -122,6 +136,30 @@ def validity_end(text: str) -> str | None:
 
 def lines_of_type(text: str, *keywords: str) -> list[str]:
     return [ln for ln in (text or "").split("\n") if any(k in ln for k in keywords)]
+
+
+def field(line: str, i: int) -> str:
+    """OCR 结构化行第 i 个字段（0 起）；字段不足返回空串。"""
+    parts = [x.strip() for x in (line or "").split("|")]
+    return parts[i] if i < len(parts) else ""
+
+
+def sign_date_of(line: str) -> str | None:
+    """第 7 字段（落款/签发日期），缺失时退化为行内最后一个日期（有效期字段之外）。"""
+    from services.fujian_check.dates import find_dates
+
+    d = find_dates(field(line, 6))
+    if d:
+        return d[0]
+    rest = "|".join(x for i, x in enumerate((line or "").split("|")) if i not in (4,))
+    ds = find_dates(rest)
+    return ds[-1] if ds else None
+
+
+def months_of(line: str) -> list[str]:
+    from services.fujian_check.dates import months_covered
+
+    return months_covered(field(line, 7) or line)
 
 
 def is_unreadable(text: str) -> bool:

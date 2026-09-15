@@ -160,7 +160,7 @@ def _run_job(job: str, tender: Path, bid: Path, use_ocr: bool, use_llm: bool) ->
         _apply_settings()
         llm = SimpleLLM(_llm_conf()) if use_llm and _llm_conf() else None
         report = asyncio.run(run_check(str(tender), str(bid), llm=llm, use_llm=bool(llm), use_ocr=use_ocr and _ocr_ready(),
-                                       progress=progress, ocr_budget=20))
+                                       progress=progress, ocr_budget=24))
         payload = to_platform_payload(report)
         d = JOBS / job
         (d / "report.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

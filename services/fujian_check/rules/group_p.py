@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import re
 
-from services.fujian_check.models import Finding
+from services.fujian_check.dates import days_after, find_invalid_dates, iso, parse_date
+from services.fujian_check.models import Finding, Sourced
 from services.fujian_check.rules._helpers import cover_pages, fmt_money, level_rank, norm, page_contains, pct
 from services.fujian_check.rules.base import Rule, RuleContext
 
 GROUP = "前附表硬值"
+GROUP_DATES = "签署与日期"
 
 
 class P01Duration(Rule):
@@ -183,6 +185,17 @@ class P07ProjectManagerQualification(Rule):
         if not has_b and verdict == "pass":
             verdict = "warning"
             missing.append("简要情况表文字层未见安B证书号（可能仅扫描件）")
+        # 注册证书使用有效期（简要情况表文字层）
+        if pm.cert_valid_end:
+            end, dl = parse_date(pm.cert_valid_end), parse_date(h.deadline)
+            parts.append(f"注册证书有效期至 {pm.cert_valid_end}")
+            if dl and end and end < dl:
+                verdict = "fail"
+                missing.append(f"建造师注册证书有效期止 {pm.cert_valid_end} 早于投标截止 {iso(dl)}")
+            elif dl and end and h.validity_days and end < days_after(dl, h.validity_days):
+                if verdict == "pass":
+                    verdict = "warning"
+                missing.append(f"注册证书在投标有效期内到期（{pm.cert_valid_end}），评标可能质疑")
         parts.append("本企业在岗：需核对注册单位（扫描件）")
         return [self.make(verdict, requirement=h.pm_requirement or "项目负责人资格", requirement_loc=req_loc,
                           actual="；".join(parts), evidence=ev, missing="；".join(missing),
@@ -224,5 +237,53 @@ class P10AwardFile(Rule):
                           missing="缺定标文件", fix="按附件2 格式编制定标文件")]
 
 
+class P09SignDates(Rule):
+    id, group, title, severity = "FJ-P-09", GROUP_DATES, "各表单签署日期：不晚于投标截止、不早于招标文件日期、无非法日期", "major"
+    supersedes = ["validity", "consistency"]
+    source_clause = "14.1"
+
+    async def run(self, ctx: RuleContext) -> list[Finding]:
+        h, L = ctx.req.hard, ctx.idx.letter
+        dl, notice = parse_date(h.deadline), parse_date(h.notice_date)
+        req_loc = ctx.qfb_loc("14.1") or h.sources.get("deadline")
+        dates: dict[str, Sourced] = dict(ctx.idx.form_dates)
+        if L and L.date and not any("投标函" in k for k in dates):
+            dates["投标函"] = Sourced(value=L.date, loc=L.loc)
+        if not dates:
+            return [self.manual("各表单落款日期合法且不晚于投标截止", "文字层未抽到任何落款日期（可能均在签章图片内）", [], req_loc)]
+        problems: list[str] = []
+        ev = []
+        parsed: dict[str, object] = {}
+        for title, s in dates.items():
+            d = parse_date(str(s.value))
+            if s.loc:
+                ev.append(s.loc)
+            if d is None:
+                continue
+            parsed[title] = d
+            if dl and d > dl:
+                problems.append(f"{title} {s.value} 晚于投标截止 {iso(dl)}")
+            elif notice and d < notice:
+                problems.append(f"{title} {s.value} 早于招标文件日期 {iso(notice)}")
+            if s.loc and s.loc.page:
+                inv = find_invalid_dates(ctx.bdoc.page_text(s.loc.page))
+                if inv:
+                    problems.append(f"{title} 出现非法日期「{inv[0].strip()}」")
+        spread_note = ""
+        if len(parsed) >= 2:
+            lo, hi = min(parsed.values()), max(parsed.values())
+            if (hi - lo).days > 30:      # type: ignore[operator]
+                spread_note = f"各表单日期跨度 {(hi - lo).days} 天（{iso(lo)} ~ {iso(hi)}）"  # type: ignore[arg-type]
+        actual = "；".join(f"{t} {s.value}" for t, s in dates.items())
+        req = f"落款日期 ≤ 投标截止 {iso(dl)}" + (f"，≥ 招标文件日期 {iso(notice)}" if notice else "")
+        if problems:
+            return [self.make("fail", requirement=req, requirement_loc=req_loc, actual=actual[:500], evidence=ev[:6],
+                              missing="；".join(problems), fix="改正落款日期后重新导出；日期须在招标文件发出之后、投标截止之前")]
+        if spread_note:
+            return [self.make("warning", requirement=req, requirement_loc=req_loc, actual=actual[:500], evidence=ev[:6],
+                              missing=spread_note, fix="核对是否有旧文件未更新日期")]
+        return [self.make("pass", requirement=req, requirement_loc=req_loc, actual=f"{len(dates)} 张表单落款日期均合规：" + actual[:400], evidence=ev[:6])]
+
+
 RULES = [P01Duration, P02Quality, P03Validity, P04Deposit, P05ProjectIdentity, P06PerformanceBond,
-         P07ProjectManagerQualification, P08JointVenture, P10AwardFile]
+         P07ProjectManagerQualification, P08JointVenture, P09SignDates, P10AwardFile]

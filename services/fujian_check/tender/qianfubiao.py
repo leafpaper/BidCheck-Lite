@@ -130,6 +130,16 @@ def extract_hard_values(rows: list[QfbRow], doc: ParsedDoc | None = None) -> Har
     if r:
         _set(hard, "xml_required", "XML" in r.content.upper(), r)
 
+    # 招标文件日期：封面/公告页第一个日期（签署日期下限）
+    if doc is not None:
+        from services.fujian_check.dates import find_dates
+
+        for p in range(1, min(doc.n_pages, 4) + 1):
+            ds = find_dates(doc.page_text(p))
+            if ds:
+                hard.notice_date = ds[0]
+                hard.sources["notice_date"] = Location(doc="tender", page=p, section="第1章 招标公告", clause="招标文件日期", excerpt=ds[0])
+                break
     # 招标控制价：前附表通常不含，从第1章招标公告找
     if doc is not None:
         for p in range(1, min(doc.n_pages, 6) + 1):

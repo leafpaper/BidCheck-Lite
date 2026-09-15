@@ -13,7 +13,8 @@ from pathlib import Path
 from services.fujian_check import PARSER_VERSION
 from services.fujian_check.models import ParsedDoc
 
-OCR_PROMPT_VERSION = "1"
+OCR_PROMPT_VERSION = "2"
+LLM_PROMPT_VERSION = "1"
 
 
 def cache_dir() -> Path:
@@ -85,6 +86,29 @@ def ocr_cache_get(file_hash: str, page: int, prompt_key: str) -> str | None:
 def ocr_cache_put(file_hash: str, page: int, prompt_key: str, text: str) -> None:
     try:
         _ocr_path(file_hash, page, prompt_key).write_text(text, encoding="utf-8")
+    except Exception:
+        pass
+
+
+# ---------- LLM 判定 ----------
+
+def _llm_path(key: str) -> Path:
+    return _ensure(cache_dir() / "llm") / f"{key}_{LLM_PROMPT_VERSION}.json"
+
+
+def llm_cache_get(key: str) -> dict | None:
+    p = _llm_path(key)
+    try:
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return None
+
+
+def llm_cache_put(key: str, data: dict) -> None:
+    try:
+        _llm_path(key).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
 

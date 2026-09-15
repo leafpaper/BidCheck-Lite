@@ -17,6 +17,12 @@ _NAME_RE = re.compile(r"^[一-龥·]{2,4}$")
 _NOT_NAMES = {"岗位名称", "姓名", "职称类型", "职称编号", "职称专业", "注册编号", "注册专业", "岗位证书", "类型及等级", "备注",
               "如有", "序号", "岗位证书类型", "岗位证书编号", "执业注册"}
 _ID_RE = re.compile(r"\d{17}[\dXx]")
+_MAJORS = ("建筑工程", "市政公用工程", "公路工程", "水利水电工程", "机电工程", "矿业工程", "港口与航道工程",
+           "通信与广电工程", "铁路工程", "民航机场工程")
+_MAJOR_RE = re.compile("(" + "|".join(_MAJORS) + ")")
+_CERT_NO_RE = re.compile(r"^[一-龥]{0,4}[A-Za-z0-9()（）\-]{5,40}$")
+_QUERY_VALID_RE = re.compile(r"查询有效期\s*\n?\s*(20\d{2}[-./年]\d{1,2}[-./月]\d{1,2}日?)\s*[至到\-~]\s*(20\d{2}[-./年]\d{1,2}[-./月]\d{1,2})")
+_TABLE_CODE_RE = re.compile(r"招标项目编号\s*\n?\s*([A-Z]{1,2}\d{12,22})")
 
 
 def _parse_staff_table_text(doc: ParsedDoc, p0: int, p1: int) -> list[Person]:
@@ -31,7 +37,10 @@ def _parse_staff_table_text(doc: ParsedDoc, p0: int, p1: int) -> list[Person]:
             for j in range(i + 1, min(i + 3, len(lines))):
                 if _NAME_RE.match(lines[j]) and lines[j] not in _NOT_NAMES and not _POST_RE.match(lines[j]):
                     cert = lines[j + 1] if j + 1 < len(lines) else None
-                    people.append(Person(name=lines[j], post=m.group(1), cert=cert, page=p))
+                    cert_no = None
+                    if j + 2 < len(lines) and _CERT_NO_RE.match(lines[j + 2]) and not _NAME_RE.match(lines[j + 2]):
+                        cert_no = lines[j + 2]
+                    people.append(Person(name=lines[j], post=m.group(1), cert=cert, cert_no=cert_no, page=p))
                     break
     # 去重（同名同岗）
     seen: set[tuple[str, str]] = set()
@@ -70,7 +79,41 @@ def _enrich_from_form(doc: ParsedDoc, p0: int, p1: int, post: str) -> Person | N
     cert = kv.get("注册建造师执业资格等级") or kv.get("职称")
     cert_no = kv.get("建造师注册编号") or kv.get("职称证书编号")
     title = kv.get("职称")
-    return Person(name=name, post=post, id_no=id_no, cert=cert, cert_no=cert_no, title=title, page=p0)
+    flat = re.sub(r"\s+", "", to_halfwidth(doc.page_text(p0)))
+    major = kv.get("建造师专业") or kv.get("注册专业")
+    if not major:
+        mm = re.search(r"建造师专业([一-龥]{2,10}?工程)", flat)
+        major = mm.group(1) if mm else None
+    valid_end = None
+    mm = re.search(r"使用有效期(?:\(若有\))?(20\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2}日?)[-~至到]+(20\d{2}[.\-/年]\d{1,2}[.\-/月]\d{1,2})", flat)
+    if mm:
+        from services.fujian_check.dates import find_dates
+
+        ds = find_dates(mm.group(2))
+        valid_end = ds[0] if ds else None
+    return Person(name=name, post=post, id_no=id_no, cert=cert, cert_no=cert_no, title=title, reg_major=major,
+                  cert_valid_end=valid_end, page=p0)
+
+
+def _table_meta(doc: ParsedDoc, p: int, table: PersonnelTable) -> None:
+    """平台打印件表头：查询有效期止日、招标项目编号；项目负责人注册专业。"""
+    t = to_halfwidth(doc.page_text(p))
+    m = _QUERY_VALID_RE.search(t)
+    if m:
+        from services.fujian_check.dates import find_dates
+
+        ds = find_dates(m.group(2))
+        table.query_valid_end = ds[0] if ds else None
+    m = _TABLE_CODE_RE.search(t)
+    if m:
+        table.project_code = m.group(1)
+    pm = next((x for x in table.people if x.post == "项目负责人"), None)
+    if pm and not pm.reg_major:
+        # 第一部分（执业注册）里的注册专业列；取项目负责人行附近第一个专业词
+        seg = t[: t.find("岗位证书类型")] if "岗位证书类型" in t else t
+        mm = _MAJOR_RE.search(seg)
+        if mm:
+            pm.reg_major = mm.group(1)
 
 
 def parse_personnel(doc: ParsedDoc, idx: BidIndex) -> PersonnelTable | None:
@@ -80,6 +123,7 @@ def parse_personnel(doc: ParsedDoc, idx: BidIndex) -> PersonnelTable | None:
         table.people = _parse_staff_table_text(doc, fr.page_start, fr.page_end or fr.page_start)
         table.loc = Location(doc="bid", page=fr.page_start, page_end=fr.page_end, section="第1节 资格文件",
                              form=fr.form.title if fr.form else fr.matched_title)
+        _table_meta(doc, fr.page_start, table)
     pm_fr = idx.form("项目负责人简要情况表")
     if pm_fr and pm_fr.page_start:
         pm = _enrich_from_form(doc, pm_fr.page_start, pm_fr.page_end or pm_fr.page_start, "项目负责人")
@@ -89,6 +133,8 @@ def parse_personnel(doc: ParsedDoc, idx: BidIndex) -> PersonnelTable | None:
                 existing.id_no = existing.id_no or pm.id_no
                 existing.cert_no = existing.cert_no or pm.cert_no
                 existing.title = existing.title or pm.title
+                existing.reg_major = existing.reg_major or pm.reg_major
+                existing.cert_valid_end = existing.cert_valid_end or pm.cert_valid_end
                 if existing.name != pm.name:
                     idx.parse_warnings.append(f"项目负责人姓名不一致: 人员表 {existing.name} vs 简要情况表 {pm.name}")
             else:

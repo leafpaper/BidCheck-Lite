@@ -6,7 +6,9 @@ from services.fujian_check.profiles import get_profile
 from services.fujian_check.tender.appendix import find_appendix_pages, parse_appendix
 from services.fujian_check.tender.datasheet import (
     find_dangerous_works,
+    find_similar_project_years,
     find_similar_projects,
+    find_social_window,
     find_staffing,
     parse_datasheet,
 )
@@ -59,6 +61,7 @@ def extract_requirements(doc: ParsedDoc, profile: TenderProfile) -> TenderRequir
         sp = find_similar_projects(req.datasheet)
         if sp is not None and req.hard.similar_projects_required is None:
             req.hard.similar_projects_required = sp
+        req.hard.similar_projects_years = find_similar_project_years(req.datasheet)
         if not req.datasheet:
             warn.append("未解析出评标办法和标准数据表")
     else:
@@ -74,6 +77,17 @@ def extract_requirements(doc: ParsedDoc, profile: TenderProfile) -> TenderRequir
         req.appendix_params = parse_appendix(doc, pages, "tender", "第8章 投标文件格式")
         if not req.forms:
             warn.append("第8章未解析出表单清单")
+        # 社保时间窗：第8章「安全员及其社保凭证」表单说明
+        for p in range(ch8.page_start, ch8.page_end + 1):
+            t = doc.page_text(p)
+            if "社保" in t and "为始点" in t:
+                a, b = find_social_window(t)
+                if a or b:
+                    req.hard.social_start_offset, req.hard.social_months = a, b
+                    from services.fujian_check.models import Location
+
+                    req.hard.sources["social_months"] = Location(doc="tender", page=p, section="第8章 投标文件格式", clause="安全员社保凭证说明")
+                    break
     else:
         warn.append("未找到第8章")
 

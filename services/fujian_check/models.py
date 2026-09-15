@@ -247,6 +247,10 @@ class HardValues(BaseModel):
     xml_required: bool | None = None
     deadline: str | None = None
     performance_bond: str | None = None
+    notice_date: str | None = None               # 招标文件/公告日期 YYYY-MM-DD（签署日期下限）
+    similar_projects_years: int | None = None    # 类似工程业绩「前 N 年内」
+    social_start_offset: int | None = None       # 社保：截止日前「上 N 个月」为始点
+    social_months: int | None = None             # 社保：连续缴费累计 M 个月
     sources: dict[str, Location] = Field(default_factory=dict)   # 字段名 → 来源
 
 
@@ -321,6 +325,8 @@ class Person(BaseModel):
     cert: str | None = None
     cert_no: str | None = None
     title: str | None = None         # 职称
+    reg_major: str | None = None     # 注册专业（建造师）
+    cert_valid_end: str | None = None  # 注册证书使用有效期止 YYYY-MM-DD
     page: int | None = None
     para_index: int | None = None
 
@@ -328,6 +334,8 @@ class Person(BaseModel):
 class PersonnelTable(BaseModel):
     people: list[Person] = Field(default_factory=list)
     loc: Location | None = None
+    query_valid_end: str | None = None   # 平台打印件「查询有效期」止日
+    project_code: str | None = None      # 表头「招标项目编号」
 
     def by_post(self, post: str) -> list[Person]:
         return [p for p in self.people if post in p.post]
@@ -355,6 +363,9 @@ class BidIndex(BaseModel):
     tech_segments: list[TechSegment] = Field(default_factory=list)
     bidder_name: str = ""
     legal_rep: str | None = None
+    legal_rep_id: str | None = None                                        # 法定代表人身份证号（资格证明书文字层）
+    form_dates: dict[str, Sourced] = Field(default_factory=dict)           # 表单标题 → 落款日期 YYYY-MM-DD
+    basic_account: str | None = None                                       # 投标人基本账户账号
     docx_mode: bool = False
     parse_warnings: list[str] = Field(default_factory=list)
 

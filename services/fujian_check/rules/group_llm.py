@@ -65,7 +65,7 @@ class B10OtherSubstantive(Rule):
         if not clauses:
             clauses = [c for c in ctx.req.rejection if c.group == "须知正文"][:6]
         out: list[Finding] = []
-        for c in clauses[:8]:
+        for c in clauses[:5]:
             kws = [k for k in re.findall(r"[一-龥]{2,6}", c.text) if k not in ("否决", "投标", "招标", "评标", "委员会", "投标人")][:4]
             windows = locate(ctx, section="商务文件", patterns=[re.escape(k) for k in kws[:3]], window_chars=900, max_windows=2)
             if not windows:
@@ -89,7 +89,7 @@ class T03TechContent(Rule):
         proj = ctx.req.project_name
         scale = (ctx.req.qfb("1.5").content if ctx.req.qfb("1.5") else "")
         out: list[Finding] = []
-        for sg in segs[:7]:
+        for sg in segs[:5]:
             p0 = sg.page_start or 1
             text = "\n".join(ctx.bdoc.page_text(p) for p in range(p0, min(p0 + 1, sg.page_end or p0) + 1))[:1500]
             w = EvidenceWindow(loc=ctx.bid_page_loc(p0, "技术文件", sg.title), text=text, score=1.0)

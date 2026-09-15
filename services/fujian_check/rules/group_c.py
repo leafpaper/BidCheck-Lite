@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import re
 
+from services.fujian_check.dates import days_after, iso, month_window, months_covered, parse_date
 from services.fujian_check.models import Finding, FormRange
 from services.fujian_check.rules._helpers import level_rank, norm
 from services.fujian_check.rules.base import Rule, RuleContext
-from services.fujian_check.rules.ocr import dates_in, is_unreadable, lines_of_type
+from services.fujian_check.rules.ocr import dates_in, field, is_unreadable, lines_of_type, sign_date_of
 
 GROUP = "扫描件证书"
 
@@ -120,18 +121,175 @@ class CertRule(Rule):
             if need is not None and got and min(got) > need:
                 problems.append("资质等级低于招标要求")
         # 截止日期（C-06）
+        warns: list[str] = []
         if self.id == "FJ-C-06" and deadline:
             ds = [d for d in dates_in(joined)]
             late = [d for d in ds if d > deadline]
             if ds and late and not [d for d in ds if d <= deadline]:
                 problems.append(f"凭证日期 {late[0]} 晚于投标截止")
+            p2, w2 = deposit_checks(ctx, joined, rel)
+            problems += p2
+            warns += w2
+        # 社保逐人（C-05）
+        if self.id == "FJ-C-05":
+            p2, w2 = social_checks(ctx, joined)
+            problems += p2
+            warns += w2
+            if not ends and lines_of_type(joined, "社保", "社会保险", "养老", "参保"):
+                ends = ["社保"]     # 社保证明本身无有效期，不因此降级
         actual = "OCR：" + "；".join(r[:80] for r in rel[:4])
         if problems:
             return [self.make("fail", requirement=f"{self.title}（截止 {deadline or '—'}）", requirement_loc=req_loc, actual=actual,
-                              evidence=ev, missing="；".join(problems), fix="更换/续期证书或核对单位名称", confidence=0.7)]
+                              evidence=ev, missing="；".join(problems + warns), fix="更换/续期证书或核对单位名称", confidence=0.7)]
+        if warns:
+            return [self.make("warning", requirement=f"{self.title}（截止 {deadline or '—'}）", requirement_loc=req_loc, actual=actual,
+                              evidence=ev, missing="；".join(warns), fix="按提示核对扫描件", confidence=0.7)]
         conf_note = "" if ends else "（未识别到有效期，需人工复核）"
         return [self.make("pass" if ends else "warning", requirement=f"{self.title}（截止 {deadline or '—'}）", requirement_loc=req_loc,
                           actual=actual + conf_note, evidence=ev, missing="" if ends else "OCR 未读出有效期", confidence=0.75)]
 
 
-RULES = [CertRule(*c) for c in _CERTS]
+def social_checks(ctx: RuleContext, joined: str) -> tuple[list[str], list[str]]:
+    """安全员社保证明：人名 = 人员表安全员、单位 = 投标人、缴费月份覆盖要求区间。返回 (problems, warnings)。"""
+    problems: list[str] = []
+    warns: list[str] = []
+    lines = lines_of_type(joined, "社保", "社会保险", "养老", "参保", "缴费")
+    if not lines:
+        return problems, ["OCR 未识别到社保缴费证明"]
+    text = "\n".join(lines)
+    names = [p.name for p in (ctx.idx.personnel.people if ctx.idx.personnel else []) if "安全员" in p.post]
+    if names and not any(n in text for n in names):
+        problems.append(f"社保证明未见安全员姓名（人员表：{'、'.join(names)}）")
+    bidder = ctx.idx.bidder_name
+    if bidder and re.search(r"公司|集团", text) and norm(bidder) not in norm(text) and norm(bidder)[:6] not in norm(text):
+        warns.append("社保证明缴费单位未见与投标人一致（可能为上级统筹单位）")
+    dl = parse_date(ctx.req.hard.deadline)
+    months = months_covered(text)
+    if dl and months:
+        off = ctx.req.hard.social_start_offset or 2
+        need = ctx.req.hard.social_months or 6
+        win = month_window(dl, off, need)
+        have = [m for m in win if m in months]
+        if len(have) < need:
+            warns.append(f"缴费月份覆盖 {len(have)}/{need} 个月（要求 {win[0]} ~ {win[-1]}；识别到 {', '.join(months[:8])}）")
+    elif dl and not months:
+        warns.append("OCR 未读出缴费月份，需人工核对社保区间")
+    return problems, warns
+
+
+def deposit_checks(ctx: RuleContext, joined: str, rel: list[str]) -> tuple[list[str], list[str]]:
+    """保证金凭证：付款账号 = 基本账户、注明招标项目编号、保函有效期 ≥ 截止 + 投标有效期 + 30 天。"""
+    problems: list[str] = []
+    warns: list[str] = []
+    flat = re.sub(r"\s+", "", joined)
+    acct = ctx.idx.basic_account
+    if acct:
+        nums = re.findall(r"\d{10,25}", flat)
+        if nums and acct not in nums and not any(n.endswith(acct[-8:]) for n in nums):
+            warns.append(f"凭证付款账号未见基本账户 {acct[:4]}…{acct[-4:]}（须从基本账户转出）")
+    code = ctx.req.project_code
+    if code and code[:15] not in flat:
+        warns.append("凭证/保函未见注明本项目招标编号")
+    dl = parse_date(ctx.req.hard.deadline)
+    guarantee = lines_of_type(joined, "保函", "担保")
+    if guarantee and dl:
+        need_end = days_after(dl, (ctx.req.hard.validity_days or 0) + 30)
+        ends = []
+        for ln in guarantee:
+            ends += [e for e in _validity_ends(ln) if e != "长期"]
+        short = [e for e in ends if parse_date(e) and parse_date(e) < need_end]
+        if short:
+            problems.append(f"保函有效期止 {min(short)} 早于投标截止+有效期+30天（{iso(need_end)}）")
+    return problems, warns
+
+
+class C07AuthorizationAndId(Rule):
+    id, group, title, severity = "FJ-C-07", GROUP, "授权委托书有效并覆盖评标期；法定代表人/委托代理人身份证在有效期", "reject"
+    method = "ocr"
+    supersedes = ["signature", "validity"]
+    source_clause = "3.1.10"
+
+    def _pages(self, ctx: RuleContext) -> list[int]:
+        pages: list[int] = []
+        for key in ("法定代表人资格证明书", "法定代表人身份证明", "授权委托书"):
+            fr = ctx.form(key)
+            if fr and fr.page_start:
+                pages += fr.scanned_pages or ([] if fr.match_kind == "missing" else list(range(fr.page_start, (fr.page_end or fr.page_start) + 1)))
+        return sorted(set(pages))[:6]
+
+    def ocr_pages_needed(self, ctx: RuleContext) -> list[int]:
+        return self._pages(ctx)
+
+    async def run(self, ctx: RuleContext) -> list[Finding]:
+        L = ctx.idx.letter
+        legal = ctx.idx.legal_rep
+        signer = (L.signer if L and L.signer else None) or legal
+        need_auth = bool(signer and legal and signer != legal)
+        dl = parse_date(ctx.req.hard.deadline)
+        req_loc = ctx.clause_loc(self.source_clause)
+        pages = self._pages(ctx)
+        req = ("投标函由委托代理人签署，须附有效授权委托书（委托人=法定代表人、被委托人=签字人、有效期覆盖评标期）" if need_auth
+               else "投标函由法定代表人签署，无需授权委托书") + "；身份证须在有效期内"
+        ev = [ctx.bid_page_loc(p, "法定代表人资格证明/授权委托书") for p in pages[:4]]
+        texts = {p: ctx.ocr_text.get(p, "") for p in pages if ctx.ocr_text.get(p)}
+        if not pages:
+            return [self.manual(req, "未定位到法定代表人资格证明书/授权委托书扫描页", [], req_loc)]
+        if not texts:
+            return [self.manual(req, f"扫描件 p{pages[0]}-{pages[-1]} 未 OCR", ev, req_loc, fix="开启视觉 OCR 或人工翻页核对")]
+        joined = "\n".join(texts.values())
+        problems: list[str] = []
+        warns: list[str] = []
+        notes: list[str] = [f"签字人 {signer or '—'}，法定代表人 {legal or '—'}"]
+        # 身份证
+        id_lines = lines_of_type(joined, "身份证")
+        if id_lines:
+            ends = []
+            for ln in id_lines:
+                ends += _validity_ends(ln)
+            if dl and ends:
+                bad = [e for e in ends if e != "长期" and parse_date(e) and parse_date(e) < dl]
+                if bad:
+                    problems.append(f"身份证有效期止 {min(bad)} 早于投标截止 {iso(dl)}")
+                else:
+                    notes.append("身份证有效期已核对")
+            else:
+                warns.append("身份证有效期未读出")
+        else:
+            warns.append("OCR 未识别到身份证")
+        # 授权委托书
+        if need_auth:
+            auth = lines_of_type(joined, "授权委托书", "委托书", "授权书")
+            if not auth:
+                problems.append("未见授权委托书（签字人非法定代表人）")
+            else:
+                at = "\n".join(auth)
+                if signer and signer not in at:
+                    problems.append(f"授权委托书未见被委托人 {signer}")
+                if legal and legal not in at:
+                    warns.append(f"授权委托书未见委托人（法定代表人 {legal}）")
+                sd = next((sign_date_of(ln) for ln in auth if sign_date_of(ln)), None)
+                if sd and dl and parse_date(sd) and parse_date(sd) > dl:
+                    problems.append(f"授权委托书签发日期 {sd} 晚于投标截止")
+                ends = []
+                for ln in auth:
+                    ends += _validity_ends(ln)
+                if dl and ends:
+                    need_end = days_after(dl, ctx.req.hard.validity_days or 0)
+                    short = [e for e in ends if e != "长期" and parse_date(e) and parse_date(e) < need_end]
+                    if short:
+                        problems.append(f"授权有效期止 {min(short)} 未覆盖投标有效期（至 {iso(need_end)}）")
+                    else:
+                        notes.append("授权有效期已核对")
+                elif not re.search(r"本项目|本次投标|全过程|至.{0,6}(结束|完成|终止)", at):
+                    warns.append("授权委托书有效期未读出（建议写明起止或至本项目结束）")
+        actual = "；".join(notes) + "；OCR：" + "；".join(l[:60] for l in (lines_of_type(joined, "身份证", "委托") or [joined[:80]])[:3])
+        if problems:
+            return [self.make("fail", requirement=req, requirement_loc=req_loc, actual=actual, evidence=ev, missing="；".join(problems + warns),
+                              fix="更换有效身份证扫描件 / 按第8章格式重新出具授权委托书", confidence=0.7)]
+        if warns:
+            return [self.make("warning", requirement=req, requirement_loc=req_loc, actual=actual, evidence=ev, missing="；".join(warns),
+                              fix="人工核对扫描件", confidence=0.6)]
+        return [self.make("pass", requirement=req, requirement_loc=req_loc, actual=actual, evidence=ev, confidence=0.75)]
+
+
+RULES = [CertRule(*c) for c in _CERTS] + [C07AuthorizationAndId]

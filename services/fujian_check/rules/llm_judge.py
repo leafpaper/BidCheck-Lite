@@ -1,10 +1,12 @@
 """大模型窗口判断：只喂检索窗口，输出结构化 verdict；quote 必须是窗口原文子串，否则降级 manual。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
 
+from services.fujian_check import cache
 from services.fujian_check.models import EvidenceWindow, JudgeResult
 from services.fujian_check.rules.base import Rule, RuleContext
 
@@ -41,6 +43,16 @@ async def judge_snippet(ctx: RuleContext, rule: Rule, requirement: str, windows:
     if not windows:
         return JudgeResult(verdict="manual", reason="未检索到证据窗口")
     evidence = _window_text(windows)
+    # 同一份投标文件、同一规则、同一片段 → 直接复用上次判定（0 token）；无文件对象（测试）不缓存
+    bid_hash = getattr(ctx.bdoc, "file_hash", None)
+    ckey = hashlib.sha256(f"{bid_hash}\n{rule.id}\n{requirement}\n{question}\n{evidence}".encode("utf-8")).hexdigest()[:32] if bid_hash else None
+    cached = cache.llm_cache_get(ckey) if ckey else None
+    if cached:
+        ctx.stats.cache_hits += 1
+        try:
+            return JudgeResult(**cached)
+        except Exception:
+            pass
     messages = [
         {"role": "system", "content": (
             "你是福建省房建市政施工招标的评标专家。只根据给出的【投标文件片段】判断是否满足【招标要求】。"
@@ -70,7 +82,10 @@ async def judge_snippet(ctx: RuleContext, rule: Rule, requirement: str, windows:
         conf = 0.5
     if quote and _norm(quote) not in _norm(evidence):
         return JudgeResult(verdict="manual", quote=quote[:120], reason=f"模型引用无法在片段中核实：{reason}", confidence=0.3)
-    return JudgeResult(verdict=verdict, quote=quote[:120], reason=reason, confidence=conf)  # type: ignore[arg-type]
+    jr = JudgeResult(verdict=verdict, quote=quote[:120], reason=reason, confidence=conf)  # type: ignore[arg-type]
+    if ckey:
+        cache.llm_cache_put(ckey, jr.model_dump())
+    return jr
 
 
 async def extract_kv(ctx: RuleContext, text: str, fields: dict[str, str]) -> dict[str, str | None]:

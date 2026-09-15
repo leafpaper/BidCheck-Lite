@@ -48,7 +48,7 @@ def load_document(path: str, use_cache: bool = True, stats: RunStats | None = No
 
 async def run_check(tender_path: str, bid_path: str, *, llm=None, use_llm: bool = True, use_ocr: bool = True,
                     use_cache: bool = True, rule_ids: list[str] | None = None,
-                    progress: ProgressFn | None = None, ocr_budget: int = 40, llm_budget: int = 25) -> CheckReport:
+                    progress: ProgressFn | None = None, ocr_budget: int = 40, llm_budget: int = 16) -> CheckReport:
     t0 = time.time()
     stats = RunStats()
     await _emit(progress, 0.05, "解析招标文件")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 
+from services.fujian_check.dates import add_months, month_key, months_covered, parse_date
 from services.fujian_check.models import Finding, Location
 from services.fujian_check.rules._helpers import fmt_money, level_rank, norm
 from services.fujian_check.rules.base import Rule, RuleContext
@@ -52,9 +53,41 @@ class GCF01Attachments(Rule):
 
 class GCQ01Materials(Rule):
     id, group, title, severity = "GC-Q-01", "资格文件否决", "前附表第1项 资格材料 11 项（资格承诺制可替代一般资格材料）", "reject"
+    method = "ocr"
     supersedes = ["qualification", "disqualification"]
 
+    def _fin_page(self, ctx: RuleContext) -> int | None:
+        fr = next((f for f in ctx.idx.forms if f.form and f.form.no == "3-4-2" and f.page_start), None)
+        if fr and fr.scanned_pages:
+            return fr.scanned_pages[0]
+        return None
+
+    def ocr_pages_needed(self, ctx: RuleContext) -> list[int]:
+        p = self._fin_page(ctx)
+        return [p] if p else []
+
+    def _finance_year(self, ctx: RuleContext) -> Finding | None:
+        p = self._fin_page(ctx)
+        t = ctx.ocr_text.get(p, "") if p else ""
+        if not p or not t or t.startswith("[OCR失败]"):
+            return None
+        dl = parse_date(ctx.req.hard.deadline)
+        years = sorted({int(y) for y in re.findall(r"(20\d{2})\s*年?\s*(?:度|年报|审计|财务)", t)} | {int(y) for y in re.findall(r"(20\d{2})\s*年度", t)})
+        if not years or not dl:
+            return None
+        ok = max(years) >= dl.year - 1
+        return self.make("pass" if ok else "warning", requirement="财务状况报告应为上一年度（或近期）审计报告/财务报表",
+                         actual=f"扫描件 p{p} 识别到年度：{', '.join(map(str, years))}", evidence=[ctx.bid_page_loc(p, "财务状况报告")],
+                         missing="" if ok else f"最新年度 {max(years)} 早于 {dl.year - 1}，可能不被认可", fix="" if ok else "补充最近年度审计报告", method="ocr", confidence=0.6)
+
     async def run(self, ctx: RuleContext) -> list[Finding]:
+        out = await self._materials(ctx)
+        fy = self._finance_year(ctx)
+        if fy:
+            out.append(fy)
+        return out
+
+    async def _materials(self, ctx: RuleContext) -> list[Finding]:
         quals = [f for f in ctx.req.forms_in("资格文件") if f.no.isdigit()]
         if not quals:
             return [self.na("未解析出资格材料清单")]
@@ -296,8 +329,56 @@ class GCT02Deviation(Rule):
 
 
 class GCT03Staffing(Rule):
-    id, group, title, severity = "GC-T-03", "人员配备", "【项号11】项目团队：岗位数量 + 不兼岗承诺 + 本单位在岗 + 养老保险", "major"
+    id, group, title, severity = "GC-T-03", "人员配备", "【项号11】项目团队：岗位数量 + 不兼岗承诺 + 本单位在岗 + 养老保险逐人", "major"
+    method = "ocr"
     supersedes = ["qualification"]
+
+    def _pension_pages(self, ctx: RuleContext) -> list[int]:
+        """含「养老保险」文字的页及其后紧邻扫描页；按团队人数封顶 8 页。"""
+        team = len({p.name for p in ctx.idx.personnel.people}) if ctx.idx.personnel else 0
+        cap = max(2, min(8, team + 1))
+        out: list[int] = []
+        n = ctx.bdoc.n_pages
+        for p in range(1, n + 1):
+            if "养老保险" in ctx.bdoc.page_text(p):
+                if ctx.bdoc.pages[p - 1].is_scanned or len(ctx.bdoc.page_text(p)) < 400:
+                    out.append(p)
+                q = p + 1
+                while q <= n and ctx.bdoc.pages[q - 1].is_scanned and len(out) < cap:
+                    out.append(q)
+                    q += 1
+            if len(out) >= cap:
+                break
+        return sorted(set(out))[:cap]
+
+    def ocr_pages_needed(self, ctx: RuleContext) -> list[int]:
+        return self._pension_pages(ctx)
+
+    def _pension_finding(self, ctx: RuleContext, st) -> Finding:
+        pages = self._pension_pages(ctx)
+        texts = [ctx.ocr_text.get(p, "") for p in pages if ctx.ocr_text.get(p) and not ctx.ocr_text.get(p, "").startswith("[OCR失败]")]
+        pen_text_layer = any("养老保险" in ctx.bdoc.page_text(p) for p in range(1, ctx.bdoc.n_pages + 1))
+        ev = [ctx.bid_page_loc(p, "养老保险证明") for p in pages[:4]]
+        req = "全部岗位人员提供截止前六个月内任一月养老保险证明"
+        if not texts:
+            return self.make("pass" if pen_text_layer else "warning", requirement=req, requirement_loc=st.source,
+                             actual="已见养老保险证明相关页（未 OCR，逐人未核）" if pen_text_layer else "未见养老保险证明", evidence=ev,
+                             missing="" if pen_text_layer else "缺养老保险证明", method="rule", confidence=0.6)
+        joined = "\n".join(texts)
+        team = {p.name for p in ctx.idx.personnel.people} if ctx.idx.personnel else set()
+        missing_people = sorted(n for n in team if n not in joined)
+        dl = parse_date(ctx.req.hard.deadline)
+        months = months_covered(joined)
+        win = [month_key(add_months(dl.replace(day=1), -i)) for i in range(1, 7)] if dl else []
+        in_win = [m for m in months if m in win]
+        problems = []
+        if team and missing_people:
+            problems.append(f"养老保险证明未见：{'、'.join(missing_people)}")
+        if months and win and not in_win:
+            problems.append(f"识别到的缴费月份 {', '.join(months[:6])} 不在截止前六个月（{win[-1]}~{win[0]}）内")
+        actual = f"OCR {len(texts)} 页；识别到团队 {len(team) - len(missing_people)}/{len(team)} 人" + (f"；缴费月份 {', '.join(months[:6])}" if months else "；未读出缴费月份")
+        return self.make("fail" if problems else "pass", requirement=req, requirement_loc=st.source, actual=actual, evidence=ev,
+                         missing="；".join(problems), fix="" if not problems else "补充缺失人员的养老保险缴费证明", method="ocr", confidence=0.65)
 
     async def run(self, ctx: RuleContext) -> list[Finding]:
         st = ctx.req.staffing
@@ -329,9 +410,7 @@ class GCT03Staffing(Rule):
             out.append(self.make("pass" if c else "warning", requirement=req, requirement_loc=st.source,
                                  actual=f"已见 p{c.loc.page}" if c else "未检索到相应承诺", evidence=[c.loc] if c else [],
                                  missing="" if c else "缺单独承诺函（在响应表中响应不算）", fix="" if c else "补充单独承诺函"))
-        pen = any("养老保险" in ctx.bdoc.page_text(p) for p in range(1, ctx.bdoc.n_pages + 1))
-        out.append(self.make("pass" if pen else "warning", requirement="全部岗位人员提供截止前六个月内任一月养老保险证明", requirement_loc=st.source,
-                             actual="已见养老保险证明相关页" if pen else "未见养老保险证明", missing="" if pen else "缺养老保险证明", method="rule", confidence=0.6))
+        out.append(self._pension_finding(ctx, st))
         return out
 
 

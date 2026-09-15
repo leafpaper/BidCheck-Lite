@@ -278,4 +278,52 @@ def build_bid_index(doc: ParsedDoc, req: TenderRequirements, profile: Profile) -
         idx.boq_summary = parse_boq_summary(doc, idx.boq_page_range)
 
     idx.personnel = parse_personnel(doc, idx)
+    _collect_dates_and_ids(doc, idx)
     return idx
+
+
+_ACCOUNT_RE = re.compile(r"账\s*号\s*[:：]?\s*(\d{10,25})")
+_LEGAL_ID_RE = re.compile(r"身份证号码?\s*[:：]?\s*(\d{17}[\dXx])")
+_LEGAL_NAME_RE = re.compile(r"姓\s*名\s*[:：]?\s*([一-龥]{2,4})\s*性\s*别")
+_DATE_FORMS_SKIP = ("工程量清单", "简要情况表", "管理人员表", "业绩", "基本情况表", "基本账户", "编制人员", "相关信息表", "联合体协议")
+
+
+def _collect_dates_and_ids(doc: ParsedDoc, idx: BidIndex) -> None:
+    """各表单文字层落款日期、基本账户账号、法定代表人身份证号。"""
+    from services.fujian_check.dates import last_date
+    from services.fujian_check.models import Sourced
+
+    for fr in idx.forms:
+        if fr.page_start is None or fr.match_kind not in ("exact", "alias", "fuzzy"):
+            continue
+        title = fr.form.title if fr.form else fr.matched_title
+        end = fr.page_end or fr.page_start
+        if "基本账户" in title:
+            m = _ACCOUNT_RE.search(to_halfwidth("\n".join(doc.page_text(p) for p in range(fr.page_start, end + 1))))
+            if m:
+                idx.basic_account = m.group(1)
+        if "法定代表人" in title and "证明" in title:
+            t0 = to_halfwidth(doc.page_text(fr.page_start))
+            m = _LEGAL_ID_RE.search(t0)
+            if m:
+                idx.legal_rep_id = m.group(1).upper()
+            m = _LEGAL_NAME_RE.search(t0)
+            if m and "系" in t0 and "法定代表人" in t0:
+                idx.legal_rep = m.group(1)       # 资格证明书里的才是法定代表人；封面签字人可能是委托代理人
+        if any(k in title for k in _DATE_FORMS_SKIP):
+            continue
+        if end - fr.page_start > 6:      # 长表单（履约承诺书 3 页以内）只看前后 3 页
+            pages = list(range(fr.page_start, fr.page_start + 3)) + list(range(end - 2, end + 1))
+        else:
+            pages = list(range(fr.page_start, end + 1))
+        found = None
+        for p in pages:
+            t = doc.page_text(p)
+            if doc.pages[p - 1].is_scanned:
+                continue
+            d = last_date(t)
+            if d and ("日期" in t or "年" in t or "-" in t):
+                found = (d, p)
+        if found:
+            sec = fr.form.section if fr.form else None
+            idx.form_dates[title] = Sourced(value=found[0], loc=Location(doc="bid", page=found[1], section=sec, form=title, excerpt=found[0]))

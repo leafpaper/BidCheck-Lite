@@ -4,10 +4,13 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from services.fujian_check.bid.personnel import _MAJOR_RE
+from services.fujian_check.dates import age_at, id_valid, iso, parse_date
 from services.fujian_check.models import Finding
 from services.fujian_check.rules.base import Rule, RuleContext
 
 GROUP = "人员配备"
+_POST_PREFIX_RE = re.compile(r"^(土建|设备安装|市政|装饰|水电|安装)")
 
 _POST_FAMILY = {
     "施工员": ("施工员",), "质量员": ("质量员",), "材料员": ("材料员",), "机械员": ("机械员",),
@@ -136,4 +139,114 @@ class S06TableVsAward(Rule):
                           evidence=[ctx.form_loc(award)], missing="" if ok else "定标文件出现资格文件未列的人员", fix="" if ok else "统一人员")]
 
 
-RULES = [S01Headcount, S02OnePersonOnePost, S04TechLeadTitle, S06TableVsAward]
+class S03PostCertMatch(Rule):
+    id, group, title, severity = "FJ-S-03", GROUP, "施工现场管理人员岗位证书类型与岗位一致，安全员持 C 证", "reject"
+    method = "table"
+    source_clause = "3.1.8"
+
+    async def run(self, ctx: RuleContext) -> list[Finding]:
+        st = ctx.req.staffing
+        ppl = [p for p in (ctx.idx.personnel.people if ctx.idx.personnel else []) if "负责人" not in p.post]
+        if not ppl:
+            return [self.na("无施工现场管理人员表")]
+        fr = ctx.form("施工现场管理人员表") or ctx.form("施工管理人员表")
+        ev = [ctx.form_loc(fr)] if fr and fr.page_start else []
+        problems: list[str] = []
+        no_number: list[str] = []
+        for p in ppl:
+            base = _POST_PREFIX_RE.sub("", p.post)
+            cert = p.cert or ""
+            if base == "安全员":
+                ok = bool(re.search(r"C", cert.upper())) or "安全" in cert
+            else:
+                ok = base[:2] in cert
+            if not ok:
+                problems.append(f"{p.post} {p.name}：岗位证书「{cert or '空'}」")
+            if not p.cert_no:
+                no_number.append(f"{p.post} {p.name}")
+        req = "各岗位人员须持对应岗位证书（安全员为安全生产考核合格证 C 证）"
+        if problems:
+            return [self.make("fail", requirement=req, requirement_loc=st.source if st else None, actual="；".join(problems),
+                              evidence=ev, missing="岗位证书类型与岗位不符（3.1.8 资格否决）", fix="更换持有对应岗位证书的人员并重新生成人员表")]
+        actual = f"{len(ppl)} 人证书类型均与岗位一致"
+        if no_number:
+            return [self.make("warning", requirement=req, requirement_loc=st.source if st else None, actual=actual + "；证书编号未识别：" + "、".join(no_number),
+                              evidence=ev, missing="部分人员证书编号为空或未识别", fix="核对人员表证书编号列", confidence=0.7)]
+        return [self.make("pass", requirement=req, requirement_loc=st.source if st else None, actual=actual, evidence=ev)]
+
+
+class S05PmRegisteredMajor(Rule):
+    id, group, title, severity = "FJ-S-05", GROUP, "项目负责人建造师注册专业与招标要求专业一致", "reject"
+    source_clause = "3.1.8"
+
+    async def run(self, ctx: RuleContext) -> list[Finding]:
+        h = ctx.req.hard
+        req_loc = h.sources.get("pm_requirement") or ctx.qfb_loc("4.1")
+        m = _MAJOR_RE.search(h.pm_requirement or "")
+        if not m:
+            return [self.na("招标未限定建造师注册专业", req_loc)]
+        need = m.group(1)
+        pm = next((p for p in (ctx.idx.personnel.people if ctx.idx.personnel else []) if p.post == "项目负责人"), None)
+        if pm is None:
+            return [self.manual(f"项目负责人须为{need}专业注册建造师", "未抽到项目负责人", [], req_loc)]
+        ev = [ctx.bid_page_loc(pm.page, "拟派出施工现场管理人员表")] if pm.page else []
+        if not pm.reg_major:
+            return [self.manual(f"项目负责人须为{need}专业注册建造师", f"{pm.name}：注册专业未能识别", ev, req_loc)]
+        ok = need in pm.reg_major or pm.reg_major in need
+        return [self.make("pass" if ok else "fail", requirement=f"项目负责人须为{need}专业注册建造师", requirement_loc=req_loc,
+                          actual=f"{pm.name}：注册专业 {pm.reg_major}", evidence=ev,
+                          missing="" if ok else "建造师注册专业与招标要求不符（3.1.8 资格否决）", fix="" if ok else "更换对应专业的注册建造师")]
+
+
+class S07StaffTableSelfCheck(Rule):
+    id, group, title, severity = "FJ-S-07", GROUP, "人员表查询有效期/项目编号 + 身份证校验位与年龄", "major"
+    method = "table"
+
+    async def run(self, ctx: RuleContext) -> list[Finding]:
+        pt = ctx.idx.personnel
+        dl = parse_date(ctx.req.hard.deadline)
+        out: list[Finding] = []
+        if pt and pt.loc:
+            ev = [pt.loc]
+            if pt.query_valid_end:
+                end = parse_date(pt.query_valid_end)
+                ok = not (dl and end and end < dl)
+                out.append(self.make("pass" if ok else "fail", requirement=f"人员表查询有效期须覆盖投标截止 {iso(dl)}", actual=f"查询有效期至 {pt.query_valid_end}",
+                                     evidence=ev, missing="" if ok else "人员表已过查询有效期", fix="" if ok else "重新生成人员表"))
+            if pt.project_code and ctx.req.project_code:
+                ok = pt.project_code == ctx.req.project_code or pt.project_code.startswith(ctx.req.project_code[:15])
+                out.append(self.make("pass" if ok else "fail", requirement=f"人员表招标项目编号 = {ctx.req.project_code}", actual=f"人员表编号 {pt.project_code}",
+                                     evidence=ev, missing="" if ok else "人员表属于其他项目", fix="" if ok else "按本项目重新生成人员表"))
+        # 身份证
+        subjects = [(p.post, p.name, p.id_no, p.page) for p in (pt.people if pt else []) if p.id_no]
+        if ctx.idx.legal_rep and ctx.idx.legal_rep_id:
+            fr = ctx.form("法定代表人")
+            subjects.append(("法定代表人", ctx.idx.legal_rep, ctx.idx.legal_rep_id, fr.page_start if fr else None))
+        if subjects:
+            bad: list[str] = []
+            old: list[str] = []
+            ok_n = 0
+            ev2 = []
+            for post, name, idn, page in subjects:
+                if page:
+                    ev2.append(ctx.bid_page_loc(page, post))
+                v = id_valid(idn)
+                if v is False:
+                    bad.append(f"{post} {name}：{idn}")
+                    continue
+                ok_n += 1
+                age = age_at(idn, dl)
+                if age is not None and age >= 60:
+                    old.append(f"{post} {name} {age} 岁")
+            if bad:
+                out.append(self.make("warning", requirement="身份证号校验位正确", actual="校验位错误：" + "；".join(bad), evidence=ev2[:4],
+                                     missing="身份证号校验位错误（录入有误），评标可能视为信息不实", fix="核对原件改正"))
+            if old:
+                out.append(self.make("warning", requirement="拟派人员未达退休年龄（截止日 60 岁）", actual="；".join(old), evidence=ev2[:4],
+                                     missing="已达退休年龄，评标可能质疑到岗履职", fix="确认返聘/在岗证明或更换人员"))
+            if not bad and not old:
+                out.append(self.make("pass", requirement="身份证号校验位正确且未达退休年龄", actual=f"{ok_n} 个身份证号校验通过", evidence=ev2[:4]))
+        return out or [self.na("无人员表元数据与身份证号")]
+
+
+RULES = [S01Headcount, S02OnePersonOnePost, S03PostCertMatch, S04TechLeadTitle, S05PmRegisteredMajor, S06TableVsAward, S07StaffTableSelfCheck]

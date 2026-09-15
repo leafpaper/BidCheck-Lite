@@ -25,6 +25,7 @@ _PM_RE = re.compile(r"派出(?P<name>[一-龥]{2,4}?)(?P<cert>(?:闽|[A-Z])?[\dA
 _PM2_RE = re.compile(r"项目负责人(?:姓名)?[:：]?(?P<name>[一-龥]{2,4})")
 _DATE_RE = re.compile(r"(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?")
 _BIDDER_RE = re.compile(r"投标人[:：]?(?P<b>[一-龥（）()]{4,40}?(?:公司|集团|局|院|所))\(?盖单位公章")
+_SIGNER_RE = re.compile(r"法定代表人或其委托代理人[:：]?(?P<s>[一-龥]{2,4})\(?盖章")
 
 
 def parse_bid_letter(doc: ParsedDoc, p0: int, p1: int) -> BidLetter:
@@ -77,6 +78,9 @@ def parse_bid_letter(doc: ParsedDoc, p0: int, p1: int) -> BidLetter:
     m = _BIDDER_RE.search(t)
     if m:
         letter.bidder = m.group("b")
+    m = _SIGNER_RE.search(t)
+    if m:
+        letter.signer = m.group("s")
     dates = _DATE_RE.findall(raw)
     if dates:
         y, mo, d = dates[-1]
