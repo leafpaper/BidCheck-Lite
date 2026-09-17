@@ -4,8 +4,8 @@ from __future__ import annotations
 import re
 
 from services.fujian_check.dates import add_months, month_key, months_covered, parse_date
-from services.fujian_check.models import Finding, Location
-from services.fujian_check.rules._helpers import fmt_money, level_rank, norm
+from services.fujian_check.models import Finding, Location, Sourced
+from services.fujian_check.rules._helpers import fmt_money, level_rank, norm, pct
 from services.fujian_check.rules.base import Rule, RuleContext
 from services.fujian_check.rules.ocr import lines_of_type
 
@@ -14,6 +14,32 @@ PROFILES = {"fujian_gov_cs"}
 
 def _commit(ctx: RuleContext, key: str):
     return ctx.idx.appendix.get(f"承诺:{key}")
+
+
+def _find_in_bid(ctx: RuleContext, pattern: str, label: str = "响应文件") -> Location | None:
+    rx = re.compile(pattern)
+    for p in range(1, ctx.bdoc.n_pages + 1):
+        t = re.sub(r"\s+", "", to_halfwidth_safe(ctx.bdoc.page_text(p)))
+        m = rx.search(t)
+        if m:
+            s = max(0, m.start() - 40)
+            return ctx.bid_page_loc(p, label, t[s:m.end() + 80])
+    return None
+
+
+def _tender_sentence(ctx: RuleContext, keyword: str) -> tuple[str, Location] | None:
+    """招标文件里含关键词的第一句（第二/三章优先）。"""
+    ranges = [(s.page_start, s.page_end) for s in ctx.req.sections if s.chapter in (2, 3)] or [(1, ctx.tdoc.n_pages)]
+    for a, b in ranges:
+        for p in range(a, b + 1):
+            t = re.sub(r"\s+", "", to_halfwidth_safe(ctx.tdoc.page_text(p)))
+            i = t.find(keyword)
+            if i >= 0:
+                s = max(t.rfind("。", 0, i) + 1, t.rfind("；", 0, i) + 1, 0)
+                e = t.find("。", i)
+                sent = t[s: e + 1 if e > 0 else i + 120][:220]
+                return sent, Location(doc="tender", page=p, section="第三章 采购内容及要求", clause=keyword, excerpt=sent)
+    return None
 
 
 class GCF01Attachments(Rule):
@@ -207,21 +233,27 @@ class GCQ02Special(Rule):
             L = ctx.idx.letter
             cert = (L.pm_cert_no if L else "") or ""
             pm_ok = bool(re.search(r"闽?\d{10,}", cert))
-            b_ok = bool(re.search(r"安全生产考核合格证|安B|B类|B证", ocr + layer))
+            need_b = bool(re.search(r"安全生产考核|B类|B证", h.pm_requirement))
+            b_ok = (not need_b) or bool(re.search(r"安全生产考核合格证|安B|B类|B证", ocr + layer))
             out.append(self.make("pass" if pm_ok and b_ok else ("manual" if not ocr else "warning"), requirement=h.pm_requirement[:200], requirement_loc=h.sources.get("pm_requirement"),
-                                 actual=f"开标一览表项目经理 {L.pm_name if L else '—'} 证书 {cert or '—'}；安B证{'已见' if b_ok else '未见'}" + ("" if ocr else ocr_note or "（证书扫描件未 OCR）"),
+                                 actual=f"开标一览表项目经理 {L.pm_name if L else '—'} 证书 {cert or '—'}" + (f"；安B证{'已见' if b_ok else '未见'}" if need_b else "") + ("" if ocr else ocr_note or "（证书扫描件未 OCR）"),
                                  evidence=([L.loc] if L and L.loc else []) + ev, missing="" if pm_ok and b_ok else "需核对建造师专业/等级与安B证扫描件",
-                                 fix="确认二级及以上建筑工程专业注册建造师证 + 安B证 + 本单位在岗", confidence=0.6))
-        # 中小企业声明函
-        fr = next((f for f in ctx.idx.forms if f.form and f.form.no == "7-1-1" and f.page_start), None)
+                                 fix="按磋商文件要求核对：" + h.pm_requirement[:80], confidence=0.6))
+        # 中小企业声明函：只在磋商文件专门面向中小企业、或资格材料清单列了声明函时才要求
+        sme_required = bool(ctx.req.profile.variant.get("专门面向中小企业")) or any("中小企业" in f.title for f in ctx.req.forms_in("资格文件"))
+        fr = next((f for f in ctx.idx.forms if f.page_start and (("中小企业" in f.matched_title) or (f.form and f.form.no == "7-1-1"))), None)
+        sme_loc = next((f.loc for f in ctx.req.forms_in("资格文件") if "中小企业" in f.title), None)
         if fr:
             t = ctx.bdoc.page_text(fr.page_start)
             ok = "工程" in t[:120] or "工程、服务" in t
             m = re.search(r"属于\s*([中小微]型企业)", re.sub(r"\s+", "", t))
-            out.append(self.make("pass" if ok else "warning", requirement="专门面向中小企业：须提供中小企业声明函（工程版）", actual=f"已提供{'（工程、服务版）' if ok else '（版本需核对）'}，声明为 {m.group(1) if m else '未识别'}",
+            out.append(self.make("pass" if ok else "warning", requirement="中小企业声明函（工程版）" + ("，本项目专门面向中小企业" if sme_required else ""), requirement_loc=sme_loc,
+                                 actual=f"已提供{'（工程、服务版）' if ok else '（版本需核对）'}，声明为 {m.group(1) if m else '未识别'}",
                                  evidence=[ctx.form_loc(fr)], missing="" if ok else "声明函版本可能不符"))
+        elif sme_required:
+            out.append(self.make("fail", requirement="本项目专门面向中小企业：须提供中小企业声明函", requirement_loc=sme_loc, actual="未找到", missing="缺中小企业声明函（资格审查不合格）", fix="按附件格式填写中小企业声明函（工程版）"))
         else:
-            out.append(self.make("fail", requirement="专门面向中小企业：须提供中小企业声明函", actual="未找到", missing="缺中小企业声明函（资格审查不合格）", fix="按附件7-1-1 工程版填写"))
+            out.append(self.na("磋商文件未要求中小企业声明函", sme_loc))
         return out
 
 
@@ -245,11 +277,19 @@ class GCV01Invalid(Rule):
                     fr = next((f for f in ctx.idx.forms if f.form and f.form.no == "4" and f.page_start), None)
                     out.append(self.manual(c.text, f"保证金 {fmt_money(h.deposit)}；凭证附件4 {'已定位 p%d' % fr.page_start if fr else '未见'}", [ctx.form_loc(fr)] if fr else [], c.loc))
             elif n == "4":
-                t3 = re.sub(r"\s+", "", ctx.bdoc.page_text(3) + ctx.bdoc.page_text(4))
-                ok = bool(re.search(r"有效期内始终保持有效|前附表第4项", t3))
-                out.append(self.make("pass" if ok else "warning", requirement=f"响应文件有效期不少于 {h.validity_days} 日历日", requirement_loc=h.sources.get("validity_days") or c.loc,
-                                     actual="磋商响应声明 2.3 已承诺按前附表第4项有效期" if ok else "响应声明未见有效期承诺", evidence=[ctx.bid_page_loc(3, "附件1 磋商响应声明")],
-                                     missing="" if ok else "需人工核对", fix=""))
+                decl = next((f for f in ctx.idx.forms if f.form and f.form.no == "1" and f.page_start), None) or \
+                    next((f for f in ctx.idx.forms if f.page_start and re.search(r"响应声明|响应函", f.matched_title)), None)
+                pages = list(range(decl.page_start, (decl.page_end or decl.page_start) + 1))[:4] if decl else list(range(1, min(6, ctx.bdoc.n_pages) + 1))
+                t3 = re.sub(r"\s+", "", "".join(ctx.bdoc.page_text(p) for p in pages))
+                mm = re.search(r"有效期[^。]{0,40}?(\d{2,3})\s*(?:个)?(?:日历)?[日天]", t3)
+                promised = bool(re.search(r"有效期内始终保持有效|按前附表[^。]{0,10}有效期|有效期内不撤销|有效期为", t3))
+                days_ok = (int(mm.group(1)) >= (h.validity_days or 0)) if mm else None
+                ok = promised and days_ok is not False
+                out.append(self.make("pass" if ok else ("fail" if days_ok is False else "warning"), requirement=f"响应文件有效期不少于 {h.validity_days} 日历日",
+                                     requirement_loc=h.sources.get("validity_days") or c.loc,
+                                     actual=("响应声明已承诺有效期" + (f"（{mm.group(1)} 天）" if mm else "（按前附表）")) if promised else "响应声明未见有效期承诺",
+                                     evidence=[ctx.bid_page_loc(pages[0], "附件1 磋商响应声明/响应函")],
+                                     missing="" if ok else ("有效期短于要求" if days_ok is False else "需人工核对"), fix="" if ok else "在响应声明中承诺不少于要求天数"))
             elif n == "5":
                 out.append(self.manual(c.text, "见 GC-T-02 偏离表与 ★ 条款逐项结果", [], c.loc))
             elif n == "6":
@@ -288,7 +328,9 @@ class GCT01StarTech(Rule):
                                      actual="；".join(x for x in [f"横道图 p{g.loc.page}" if g else "", f"安全责任承诺 p{s.loc.page}" if s else ""] if x) or "—",
                                      evidence=[x.loc for x in (g, s) if x], missing="；".join(probs), fix="补充横道图进度表与安全责任承诺书"))
             elif "CCC" in t or "3C" in t or "强制性" in t:
-                out.append(self.na("本项目为修缮工程，若清单无 3C/强制节能产品则不适用；有则需附认证证书", c.loc))
+                cert_loc = _find_in_bid(ctx, r"3C认证|CCC认证|强制性产品认证|节能产品认证", "认证证书")
+                out.append(self.make("pass", requirement=t[:200], requirement_loc=c.loc, actual="响应文件已附相关认证证书", evidence=[cert_loc]) if cert_loc
+                           else self.na("响应文件未见 3C/强制认证内容；若清单无此类产品则不适用，有则需附认证证书", c.loc))
             else:
                 key = "环境" if "环境" in t else ("成品保护" if "成品" in t else t[:10])
                 loc = None
@@ -431,31 +473,57 @@ class GCB01StarBiz(Rule):
                 else:
                     out.append(self.manual(t[:120], "未抽到工期", [], c.loc))
             elif t.startswith("履约保证金"):
-                loc = None
-                for p in range(1, ctx.bdoc.n_pages + 1):
-                    if re.search(r"履约保证金.{0,30}5\s*%|5\s*%.{0,30}履约保证金", re.sub(r"\s+", "", ctx.bdoc.page_text(p))):
-                        loc = ctx.bid_page_loc(p, "商务响应")
-                        break
-                out.append(self.make("pass" if loc else "warning", requirement=t[:150], requirement_loc=c.loc, actual="已见 5% 履约保证金响应" if loc else "未检索到明确响应",
-                                     evidence=[loc] if loc else [], missing="" if loc else "需在偏离表或承诺中明确响应", confidence=0.6))
+                want = pct(t)
+                if want is None:
+                    out.append(self.manual(t[:150], "招标未写明履约保证金比例，以附件5-2 逐条响应为准", [], c.loc))
+                else:
+                    pat = rf"履约保证金.{{0,40}}{want:g}\s*%|{want:g}\s*%.{{0,40}}履约保证金"
+                    loc = _find_in_bid(ctx, pat, "商务响应")
+                    out.append(self.make("pass" if loc else "warning", requirement=t[:150], requirement_loc=c.loc,
+                                         actual=f"已见 {want:g}% 履约保证金响应" if loc else f"未检索到 {want:g}% 履约保证金的明确响应",
+                                         evidence=[loc] if loc else [], missing="" if loc else "需在偏离表或承诺中明确响应", confidence=0.6))
             else:
                 out.append(self.manual(t[:150], "以附件5-2 逐条响应为准（表为空时无法核对）", [], c.loc))
-        # 其他商务要求硬点
-        checks = [
-            ("团意险专项声明", "签订合同后十五个工作日内购买实名制团意险，须专项声明（未提供按废标处理）", "fail"),
-            ("代理服务费专项保证函", "出具代理服务费成交后即时缴纳的专项保证函（未提供视为不符合其它实质性条款）", "fail"),
-            ("缺陷责任期承诺", "缺陷责任期 12 个月", "warning"),
-            ("不分包转包承诺", "不允许分包或转包", "warning"),
-            ("农民工工资承诺", "进度款优先用于发放农民工工资承诺", "warning"),
-        ]
-        src = next((c.loc for c in ctx.req.rejection if "代理服务费" in c.id), None)
-        for key, req, sev in checks:
-            c = _commit(ctx, key)
-            loc_req = src if "代理" in key else None
-            out.append(self.make("pass" if c else sev, requirement=req, requirement_loc=loc_req, actual=f"已见 p{c.loc.page}：{str(c.value)[:80]}" if c else "未检索到",
-                                 evidence=[c.loc] if c else [], missing="" if c else ("缺该项专项声明/保证函，属实质性条款" if sev == "fail" else "建议补充明确承诺"),
-                                 fix="" if c else "补充相应承诺函/保证函"))
-        return out
+        # 其他商务硬点：招标文件里「须出具 XX 专项声明/保证函，未提供按废标/无效」的条款（解析层 parse_declarations 抽出，随文件变化）
+        from services.fujian_check.bid.gov_cs import DECL_TOPICS
+
+        covered: set[str] = set()
+        decls = [c for c in ctx.req.rejection if c.id.startswith("专项声明-") or c.id == "前附表12-代理服务费保证函"]
+        for c in decls:
+            key = c.id.split("-", 1)[1] if c.id.startswith("专项声明-") else "代理服务费专项保证函"
+            if key in covered or key in ("横道图进度表", "安全责任承诺", "不兼岗承诺", "本单位在岗承诺"):   # 由 GC-T-01 / GC-T-03 核对
+                continue
+            covered.add(key)
+            found = _commit(ctx, key)
+            if found is None and key not in ("团意险专项声明", "代理服务费专项保证函", "不分包转包承诺", "缺陷责任期承诺", "农民工工资承诺", "安全责任承诺", "横道图进度表", "不兼岗承诺", "本单位在岗承诺"):
+                topic = key.replace("专项声明", "").replace("声明函", "").replace("保证函", "").replace("承诺函", "").replace("承诺书", "")
+                loc = _find_in_bid(ctx, re.escape(topic) + r".{0,60}(声明|承诺|保证函)|(声明|承诺|保证函).{0,60}" + re.escape(topic), "专项声明") if topic else None
+                found = Sourced(value=loc.excerpt, loc=loc) if loc else None
+            hard = bool(re.search(r"废标|无效|不符合[^。]{0,15}实质性|资格审查不合格|否决", c.text))
+            out.append(self.make("pass" if found else ("fail" if hard else "warning"), requirement=c.text[:220], requirement_loc=c.loc,
+                                 actual=f"已见 p{found.loc.page}：{str(found.value)[:80]}" if found else "响应文件未检索到相应声明/保证函",
+                                 evidence=[found.loc] if found else [], missing="" if found else ("缺该项专项声明/保证函，属实质性条款" if hard else "建议补充明确承诺"),
+                                 fix="" if found else "按磋商文件要求补充相应声明函/保证函"))
+        # 软性承诺：只在磋商文件提到时才查，要求原文取自磋商文件
+        for kw, key in (("分包", "不分包转包承诺"), ("缺陷责任期", "缺陷责任期承诺"), ("农民工", "农民工工资承诺")):
+            if key in covered:
+                continue
+            if kw == "分包":
+                pol = h.subcontract_policy or ""
+                if not re.search(r"不允许|不得|禁止", pol):
+                    continue
+                hit = (pol[:200], h.sources.get("subcontract_policy"))
+            else:
+                hit = _tender_sentence(ctx, kw)
+            if not hit:
+                continue
+            sent, loc_req = hit
+            found = _commit(ctx, key)
+            out.append(self.make("pass" if found else "warning", requirement=sent[:200], requirement_loc=loc_req,
+                                 actual=f"已见 p{found.loc.page}：{str(found.value)[:80]}" if found else "未检索到明确承诺",
+                                 evidence=[found.loc] if found else [], missing="" if found else "建议在承诺函或偏离表中明确响应",
+                                 fix="" if found else "补充相应承诺", confidence=0.6))
+        return out or [self.na("磋商文件未解析出★商务条款或专项声明要求")]
 
 
 class GCX01Consistency(Rule):
@@ -476,9 +544,17 @@ class GCX01Consistency(Rule):
         if seen:
             out.append(self.make("pass" if len(seen) == 1 else "warning", requirement="各处供应商名称一致", actual="；".join(seen), evidence=list(seen.values())[:3],
                                  missing="" if len(seen) == 1 else "出现多个供应商名称写法"))
-        if L and L.pm_name and L.signer:
-            out.append(self.make("pass" if L.pm_name == L.signer or True else "warning", requirement="开标一览表项目经理与响应声明签字代表",
-                                 actual=f"项目经理 {L.pm_name}；签字代表 {L.signer}", evidence=[L.loc] if L.loc else []))
+        # 签字代表 = 法定代表人，否则须有授权书
+        legal = ctx.idx.legal_rep
+        signer = L.signer if L else None
+        if signer and legal and signer != legal:
+            auth = next((f for f in ctx.idx.forms if f.page_start and re.search(r"授权", f.matched_title)), None)
+            auth_loc = ctx.form_loc(auth) if auth else _find_in_bid(ctx, r"授权委托书|授权书|法定代表人授权", "授权书")
+            out.append(self.make("pass" if auth_loc else "warning", requirement=f"响应文件签字代表 {signer} 非法定代表人 {legal}，须附法定代表人授权书",
+                                 actual="已见授权书" if auth_loc else "未检索到授权书", evidence=[auth_loc] if auth_loc else ([L.loc] if L and L.loc else []),
+                                 missing="" if auth_loc else "缺授权书或为扫描件，需人工核对", fix="" if auth_loc else "补充法定代表人授权书"))
+        elif signer and legal:
+            out.append(self.make("pass", requirement="响应文件由法定代表人签署", actual=f"签字代表 {signer} = 法定代表人", evidence=[L.loc] if L and L.loc else []))
         return out
 
 

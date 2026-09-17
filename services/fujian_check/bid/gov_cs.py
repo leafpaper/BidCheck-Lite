@@ -13,8 +13,20 @@ _KNOWN_TITLES = {
     "开标(报价)一览表": "2", "开标（报价）一览表": "2", "财务状况报告": "3-4-2", "资格承诺函": "3-4-1",
     "中小企业声明函": "7-1-1", "信用中国查询结果": "3-5", "依法缴纳税收证明材料": "3-4-2", "依法缴纳社会保障资金证明材料": "3-4-2",
 }
+# 招标文件里"未提供…按废标/无效"类专项声明的主题词 → 响应文件检索键（_COMMIT_KEYS）
+DECL_TOPICS = {
+    "团意险": "团意险专项声明", "团体意外": "团意险专项声明", "意外伤害": "团意险专项声明",
+    "代理服务费": "代理服务费专项保证函",
+    "分包": "不分包转包承诺", "转包": "不分包转包承诺",
+    "缺陷责任期": "缺陷责任期承诺", "质保期": "缺陷责任期承诺",
+    "农民工": "农民工工资承诺",
+    "安全责任": "安全责任承诺", "安全事故": "安全责任承诺",
+    "横道图": "横道图进度表", "进度表": "横道图进度表",
+    "兼任": "不兼岗承诺", "兼岗": "不兼岗承诺",
+    "在岗": "本单位在岗承诺",
+}
 _COMMIT_KEYS = {
-    "团意险专项声明": r"团意险|团体意外",
+    "团意险专项声明": r"团意险|团体意外|意外伤害保险",
     "代理服务费专项保证函": r"代理服务费.{0,40}(保证函|承诺)|保证函.{0,40}代理服务费",
     "不兼岗承诺": r"不得相互兼任|不可兼岗|不得兼岗|不重复使用|不得重复使用",
     "本单位在岗承诺": r"本单位在岗|本企业在岗",
@@ -33,11 +45,18 @@ def _first_line(doc: ParsedDoc, p: int) -> str:
     return ""
 
 
+def _is_toc(doc: ParsedDoc, p: int) -> bool:
+    """目录页：多行以"附件N"开头且几乎没有正文。"""
+    lines = [to_halfwidth(ln.strip()) for ln in doc.page_text(p).split("\n") if ln.strip()]
+    hits = sum(1 for ln in lines if _ATT_RE.match(ln))
+    return hits >= 4 and hits / max(1, len(lines)) >= 0.4
+
+
 def locate_attachments(doc: ParsedDoc, req: TenderRequirements) -> list[FormRange]:
     required = req.forms_in("响应文件")
     found: dict[str, tuple[int, str]] = {}
     for p in range(1, doc.n_pages + 1):
-        if doc.pages[p - 1].is_scanned:
+        if doc.pages[p - 1].is_scanned or _is_toc(doc, p):
             continue
         head = _first_line(doc, p)
         m = _ATT_RE.match(head)
@@ -51,7 +70,7 @@ def locate_attachments(doc: ParsedDoc, req: TenderRequirements) -> list[FormRang
                 if head.startswith(k):
                     no = v
                     break
-        if no and no not in found and p > 2:   # p2 是目录
+        if no and no not in found:
             found[no] = (p, title[:40])
     out: list[FormRange] = []
     ordered = sorted(found.items(), key=lambda kv: kv[1][0])
@@ -170,8 +189,11 @@ def build_gov_cs_index(doc: ParsedDoc, req: TenderRequirements, profile: Profile
     if m:
         idx.bidder_name = m.group(1)
     if not idx.bidder_name:
-        m = re.search(r"供应商\s*[:：]\s*([一-龥（）()]{4,40}?(?:公司|集团))", to_halfwidth(doc.page_text(4)))
-        idx.bidder_name = m.group(1) if m else ""
+        for p in range(1, min(12, doc.n_pages) + 1):
+            m = re.search(r"供应商(?:名称)?\s*[:：]\s*([一-龥（）()]{4,40}?(?:公司|集团))", to_halfwidth(doc.page_text(p)))
+            if m:
+                idx.bidder_name = m.group(1)
+                break
     m = re.search(r"法定代表人\s*[（(]?负责人[)）]?\s*[:：]\s*([一-龥]{2,4})", "\n".join(doc.page_text(p) for p in range(1, min(80, doc.n_pages) + 1)))
     if m:
         idx.legal_rep = m.group(1)
@@ -181,11 +203,18 @@ def build_gov_cs_index(doc: ParsedDoc, req: TenderRequirements, profile: Profile
     if ps:
         idx.letter = parse_price_sheet(doc, ps.page_start)
         idx.letter.bidder = idx.bidder_name
-    # 响应声明里的代表
-    t3 = re.sub(r"\s+", "", to_halfwidth(doc.page_text(3)))
-    m = re.search(r"签字代表([一-龥]{2,4})、", t3)
-    if m and idx.letter:
-        idx.letter.signer = m.group(1)
+    # 响应声明/响应函里的签字代表：在附件1 的页里找，找不到再扫前 12 页
+    decl = next((fr for fr in idx.forms if fr.form and fr.form.no == "1" and fr.page_start), None) or \
+        next((fr for fr in idx.forms if fr.page_start and re.search(r"响应声明|响应函", fr.matched_title)), None)
+    cand_pages = list(range(decl.page_start, (decl.page_end or decl.page_start) + 1))[:4] if decl else list(range(1, min(12, doc.n_pages) + 1))
+    for p in cand_pages:
+        t = re.sub(r"\s+", "", to_halfwidth(doc.page_text(p)))
+        m = re.search(r"签字代表([一-龥]{2,4})[、,，(（]", t) or re.search(r"供应商代表[:：]?([一-龥]{2,4})\(?签字", t)
+        if m:
+            if idx.letter is None:
+                idx.letter = BidLetter(loc=Location(doc="bid", page=p, section="响应文件", form="磋商响应声明"))
+            idx.letter.signer = m.group(1)
+            break
     # 偏离表
     for no, key in (("5-1", "偏离表5-1"), ("5-2", "偏离表5-2")):
         fr = next((f for f in idx.forms if f.form and f.form.no == no and f.page_start), None)

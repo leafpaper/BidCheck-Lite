@@ -191,22 +191,71 @@ def parse_ch3(doc: ParsedDoc, sec: Section) -> tuple[list[RejectionClause], list
             if role == "安全员":
                 cnt = cnt or sum(int(x) for x in re.findall(r"专职安全生产管理人员\(安全员\)(\d)人", t))
             if cnt:
+                # 证书要求从该岗位后 120 字里读，读不到才用福建模板常见默认值
+                seg_m = re.search(role + r".{0,120}", t)
+                seg = seg_m.group(0) if seg_m else ""
                 cert = None
+                extra: list[str] = []
                 if role == "项目负责人":
-                    cert = "二级建造师"
-                    extra = ["安B", "本单位在岗"]
+                    lv = re.search(r"([一二壹贰]级)(?:及以上)?[^。]{0,12}建造师", seg)
+                    cert = (lv.group(1).replace("壹", "一").replace("贰", "二") + "建造师") if lv else "二级建造师"
+                    extra = [x for x, k in (("安B", r"安全生产考核|B类|B证"), ("本单位在岗", r"本单位|本企业")) if re.search(k, seg)] or ["安B", "本单位在岗"]
                 elif role == "项目技术负责人":
-                    cert = "工程系列职称"
-                    extra = []
+                    tl = re.search(r"(中级|高级|初级)(?:及以上)?[^。]{0,8}职称", seg)
+                    cert = (tl.group(1) + "职称") if tl else "工程系列职称"
                 elif role == "安全员":
                     cert = "C证"
-                    extra = []
                 else:
-                    cert = "职业培训合格证书"
-                    extra = []
+                    cert = "岗位证书" if re.search(r"证书|培训合格", seg) else None
                 staffing.roles[role] = StaffRole(count=cnt, cert=cert, extra=extra)
         staffing.one_person_one_post = "不得相互兼任" in t or "不可兼岗" in t or "不得重复使用" in t
     return stars, items, biz + scattered, staffing, []
+
+
+_DECL_TRIGGER_RE = re.compile(
+    r"(未提供|不提供|未出具|未按要求提供|未作出|未承诺|未在规定|未按规定)[^。；;]{0,40}?"
+    r"(按废标处理|无效响应|响应无效|视为无效|不符合[^。；;]{0,15}实质性|资格审查不合格|否决|则无效|作无效|无效处理)"
+)
+_DECL_NOUN_RE = re.compile(r"([一-龥]{2,10}?)(专项声明|声明函|保证函|承诺函|承诺书)")
+
+
+def parse_declarations(doc: ParsedDoc, pages: list[int], section: str) -> list[RejectionClause]:
+    """招标文件里「须出具 XX 专项声明/保证函，未提供按废标/无效处理」类硬要求，按主题去重。
+
+    主题词来自 bid/gov_cs.DECL_TOPICS（团意险、代理服务费、分包、缺陷责任期…），找不到主题词时取「XX声明函」里的 XX。
+    """
+    from services.fujian_check.bid.gov_cs import DECL_TOPICS
+
+    out: list[RejectionClause] = []
+    seen: set[str] = set()
+    for p in pages:
+        t = _n(doc.page_text(p))
+        for m in _DECL_TRIGGER_RE.finditer(t):
+            win = t[max(0, m.start() - 300): m.end()]
+            topic = None
+            pos = -1
+            for k in DECL_TOPICS:
+                i = win.rfind(k)
+                if i > pos:
+                    pos, topic = i, k
+            key = DECL_TOPICS.get(topic) if topic else None
+            if key is None:
+                nm = list(_DECL_NOUN_RE.finditer(win))
+                if nm:
+                    key = nm[-1].group(1).lstrip("出具作出提供") + nm[-1].group(2)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            # 要求原文：从主题词所在句开始到触发句结束
+            start = 0
+            if topic:
+                tp = win.rfind(topic)
+                start = max(win.rfind("。", 0, tp) + 1, win.rfind("；", 0, tp) + 1, 0)
+            else:
+                start = max(win.rfind("。", 0, len(win) - (m.end() - m.start()) - 1) + 1, 0)
+            text = win[start:].strip("。；;() （）")
+            out.append(RejectionClause(id=f"专项声明-{key}", group="商务初审", text=text[:260], loc=_loc(p, section, "专项声明/保证函", text)))
+    return out
 
 
 def parse_invalid_cases(doc: ParsedDoc, notice: Section) -> list[RejectionClause]:
@@ -269,16 +318,25 @@ def parse_forms_ch5(doc: ParsedDoc, sec: Section) -> list[RequiredForm]:
 def extract_hard(doc: ParsedDoc, rows: list[QfbRow], special: list[tuple[str, str, int]], biz: list[RejectionClause],
                  ch3: Section | None) -> tuple[HardValues, str, str]:
     h = HardValues()
-    head = "\n".join(doc.page_text(p) for p in range(1, min(5, doc.n_pages) + 1))
+    head_pages = list(range(1, min(8, doc.n_pages) + 1))
+    head = "\n".join(doc.page_text(p) for p in head_pages)
     ht = to_halfwidth(head)
-    m = re.search(r"最高限价[（(]元[)）]\s*[:：]\s*([\d,\.]+)", ht)
+
+    def _page_of(pattern: str) -> int:
+        for p in head_pages:
+            if re.search(pattern, to_halfwidth(doc.page_text(p))):
+                return p
+        return head_pages[0]
+    m = re.search(r"最高限价\s*[（(]?(?:元|万元)?[)）]?\s*[:：]\s*([\d,\.]+)\s*(万元|元)?", ht) or \
+        re.search(r"(?:预算金额|采购预算)\s*[（(]?(?:元|万元)?[)）]?\s*[:：]\s*([\d,\.]+)\s*(万元|元)?", ht)
     if m:
-        h.control_price = Money(value=money(m.group(1) + "元") or 0, raw=m.group(0))
-        h.sources["control_price"] = _loc(2, "第一章 采购邀请书", "采购包最高限价", m.group(0))
-    m = re.search(r"保证金金额[（(]元[)）]\s*[:：]\s*([\d,\.]+)", ht)
+        unit = m.group(2) or ("万元" if "万元" in m.group(0) else "元")
+        h.control_price = Money(value=money(m.group(1) + unit) or 0, raw=m.group(0))
+        h.sources["control_price"] = _loc(_page_of(r"最高限价|预算金额|采购预算"), "第一章 采购邀请书", "采购包最高限价", m.group(0))
+    m = re.search(r"保证金金额\s*[（(]?(?:元)?[)）]?\s*[:：]\s*([\d,\.]+)", ht)
     if m:
         h.deposit = Money(value=money(m.group(1) + "元") or 0, raw=m.group(0))
-        h.sources["deposit"] = _loc(2, "第一章 采购邀请书", "采购包保证金金额", m.group(0))
+        h.sources["deposit"] = _loc(_page_of(r"保证金金额"), "第一章 采购邀请书", "采购包保证金金额", m.group(0))
     name = code = ""
     m = re.search(r"项目名称\s*[:：]\s*(\S{4,60})", ht)
     if m:
@@ -375,6 +433,9 @@ def extract_gov_cs(doc: ParsedDoc, profile: TenderProfile) -> TenderRequirements
                                                  text="供应商应出具代理服务费在成交后即时缴纳的专项保证函，未提供将被视为不符合磋商文件中规定的其它实质性条款", loc=r12.loc))
     if eval_pages:
         req.appendix_params.update(parse_scoring(doc, eval_pages))
+    # 「须出具 XX 专项声明/保证函，未提供按废标」类要求：前附表 + 须知正文 + 第三章
+    decl_pages = qfb_pages + list(range(notice.page_start, notice.page_end + 1)) + (list(range(ch3.page_start, ch3.page_end + 1)) if ch3 else [])
+    req.rejection += parse_declarations(doc, decl_pages, SEC_REQ)
     biz: list[RejectionClause] = []
     if ch3:
         stars, items, biz_and_scattered, staffing, _ = parse_ch3(doc, ch3)

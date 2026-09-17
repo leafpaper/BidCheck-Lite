@@ -281,3 +281,33 @@ def test_gc_t03_pension_per_person():
     ctx.ocr_text[3] = "社保缴费证明|养老保险|||||赵六||2025-01|"
     pen = [f for f in _run(r, ctx) if "养老保险" in f.requirement][0]
     assert pen.verdict == "fail" and "李二" in pen.missing
+
+
+# ---------- 磋商模板：专项声明从招标文件解析，不写死 ----------
+
+def test_gc_declarations_parsed_from_tender():
+    from services.fujian_check.tender.gov_cs import parse_declarations
+    from services.fujian_check.rules.group_gc import GCB01StarBiz
+
+    tender = _doc(["四、其他事项 1.成交供应商须在合同签订后为工人购买团体意外伤害保险，供应商应对此作出专项声明，未提供声明函按废标处理。"
+                   "2.供应商须提供农民工工资支付承诺书，未提供的按无效响应处理。3.本项目不收取代理服务费。"])
+    decls = parse_declarations(tender, [1], "第三章")
+    ids = {c.id for c in decls}
+    assert ids == {"专项声明-团意险专项声明", "专项声明-农民工工资承诺"}
+    assert all("未提供" in c.text for c in decls)
+
+    ctx = _ctx(["响应文件 我方承诺为本项目工人购买团体意外伤害保险。"], profile="fujian_gov_cs")
+    ctx.tdoc = tender
+    ctx.req.rejection = decls
+    from services.fujian_check.bid.gov_cs import find_commitments
+    for k, v in find_commitments(ctx.bdoc).items():
+        ctx.idx.appendix[f"承诺:{k}"] = v
+    fs = _run(GCB01StarBiz(), ctx)
+    by = {f.requirement[:12]: f for f in fs}
+    assert any(f.verdict == "pass" and "团体意外" in f.requirement for f in fs)
+    assert any(f.verdict == "fail" and "农民工" in f.requirement for f in fs)
+    assert not any("代理服务费" in f.requirement for f in fs)         # 招标未要求 → 不检查
+
+    ctx2 = _ctx(["x"], profile="fujian_gov_cs")
+    ctx2.tdoc = _doc(["无任何商务条款"])
+    assert _run(GCB01StarBiz(), ctx2)[0].verdict == "na"
